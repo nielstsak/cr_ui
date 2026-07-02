@@ -1,0 +1,50 @@
+# =========================
+# Fichiers Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Bases de données
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+# Si vous voulez ignorer spécifiquement le fichier runs.db mais garder d'autres db :
+# runs.db 
+
+# =========================
+# Données et Modèles
+# =========================
+*.h5
+*.hdf5
+*.csv
+*.parquet
+*.json
+*.md
+# Ignore le dossier de données téléchargées tout en gardant sa structure si besoin
+data/BINANCE/
+
+# =========================
+# Tests et Caches
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# =========================
+# Environnements Virtuels
+# =========================
+venv/
+env/
+.venv/
+.conda/
+
+# =========================
+# Fichiers système et IDE
+# =========================
+.vscode/
+.idea/
+.DS_Store
