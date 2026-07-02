@@ -25,7 +25,7 @@ __pycache__/
 *.md
 # Ignore le dossier de données téléchargées tout en gardant sa structure si besoin
 data/BINANCE/
-
+backend/vectorbtpro_package
 # =========================
 # Tests et Caches
 # =========================

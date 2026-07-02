@@ -12,47 +12,43 @@ import fastapi
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
+import pandas as pd
 import pydantic
 import uvicorn
 import zmq
 import talib
 
-# Local Imports
 from backend.core.indicators import DynamicIndicatorFactory, get_talib_metadata, get_ui_parameter_schema
-from backend.core.resampler import timeframe_to_ms
+from backend.core.resampler import timeframe_to_ms, resample_ohlcv
 from backend.data.binance_client import BinanceClient
 from backend.data.hdf5_storage import HDF5Storage, OHLCV_DTYPE
 from backend.ml.wfo import check_robustness, generate_wfo_splits, optimize_segment, stitch_oos_performance
 from backend.simulation.margin_portfolio import simulate_margin_portfolio
+from backend.api.routers.runs import router as runs_router, init_database_and_runs, sync_database_with_disk
+from backend.ml.analysis_engine import (
+    compute_base_features,
+    detect_kicks,
+    compute_directional_transitions,
+    compute_conditional_probabilities,
+    compute_hmm_regimes,
+    compute_pca_clusters
+)
 
-# Setup logger
 logger = logging.getLogger("GatewayAPI")
 
 
-# ==========================================
-# NumPy Binary Serializer/Deserializer
-# ==========================================
 def serialize_array(arr: np.ndarray) -> bytes:
-    """Serializes a NumPy array into binary bytes using native np.save."""
     buffer = io.BytesIO()
     np.save(buffer, arr)
     return buffer.getvalue()
 
 
 def deserialize_array(data: bytes) -> np.ndarray:
-    """Deserializes binary bytes back into a structured NumPy array."""
     buffer = io.BytesIO(data)
     return np.load(buffer)
 
 
-# ==========================================
-# ZeroMQ IPC Bridge Server Thread
-# ==========================================
 class ZMQBridgeServer(threading.Thread):
-    """
-    Independent ZeroMQ REP server running in a daemon thread.
-    Serves raw NumPy arrays from HDF5 storage via binary IPC socket requests.
-    """
     def __init__(self, storage_dir: str = "data", host: str = "127.0.0.1", port: int = 5555):
         super().__init__()
         self.storage_dir = storage_dir
@@ -67,7 +63,6 @@ class ZMQBridgeServer(threading.Thread):
         socket = context.socket(zmq.REP)
         socket.bind(f"tcp://{self.host}:{self.port}")
         
-        # Configure timeout to periodically check self.running flag
         socket.setsockopt(zmq.RCVTIMEO, 1000)
         logger.info(f"ZMQBridgeServer started on tcp://{self.host}:{self.port}")
 
@@ -80,20 +75,24 @@ class ZMQBridgeServer(threading.Thread):
                 if action == "load_data":
                     exchange = req.get("exchange", "BINANCE").upper()
                     symbol = req.get("symbol", "BTCUSDT").upper().replace("/", "")
-                    timeframe = req.get("timeframe", "1m").lower()
+                    target_timeframe = req.get("timeframe", "5m").lower()
                     start_time = int(req.get("start_time"))
                     end_time = int(req.get("end_time"))
 
-                    file_path = os.path.join(self.storage_dir, exchange, symbol, timeframe, "ohlcv.h5")
+                    base_timeframe = "5m"
+                    file_path = os.path.join(self.storage_dir, exchange, symbol, base_timeframe, "ohlcv.h5")
                     
                     if not os.path.exists(file_path):
-                        # Send an empty OHLCV array
                         empty_arr = np.empty(0, dtype=OHLCV_DTYPE)
                         socket.send(serialize_array(empty_arr))
                         continue
                         
-                    storage = HDF5Storage(file_path, exchange, symbol, timeframe)
+                    storage = HDF5Storage(file_path, exchange, symbol, base_timeframe)
                     data = storage.read_chunk(start_time, end_time)
+                    
+                    if target_timeframe != base_timeframe and len(data) > 0:
+                        data = resample_ohlcv(data, target_timeframe, align='close')
+                        
                     socket.send(serialize_array(data))
                 else:
                     socket.send_string("ERROR: Unknown request action")
@@ -115,12 +114,7 @@ class ZMQBridgeServer(threading.Thread):
         self.running = False
 
 
-# Helper client function to query ZMQ server
 def load_numpy_via_zmq(exchange: str, symbol: str, timeframe: str, start_time: int, end_time: int) -> np.ndarray:
-    """
-    Sends REQ to ZMQBridgeServer. Falls back to direct disk read if ZMQ bridge times out
-    to maintain high reliability.
-    """
     context = zmq.Context.instance()
     socket = context.socket(zmq.REQ)
     socket.setsockopt(zmq.RCVTIMEO, 5000)
@@ -141,20 +135,20 @@ def load_numpy_via_zmq(exchange: str, symbol: str, timeframe: str, start_time: i
         return deserialize_array(data_bytes)
     except Exception as e:
         logger.warning(f"ZMQ Bridge query failed: {e}. Falling back to direct HDF5 storage read.")
-        file_path = os.path.join("data", exchange.upper(), symbol.upper().replace("/", ""), timeframe.lower(), "ohlcv.h5")
+        base_timeframe = "5m"
+        file_path = os.path.join("data", exchange.upper(), symbol.upper().replace("/", ""), base_timeframe, "ohlcv.h5")
         if os.path.exists(file_path):
-            storage = HDF5Storage(file_path, exchange, symbol, timeframe)
-            return storage.read_chunk(start_time, end_time)
+            storage = HDF5Storage(file_path, exchange, symbol, base_timeframe)
+            data = storage.read_chunk(start_time, end_time)
+            if timeframe.lower() != base_timeframe and len(data) > 0:
+                data = resample_ohlcv(data, timeframe.lower(), align='close')
+            return data
         return np.empty(0, dtype=OHLCV_DTYPE)
     finally:
         socket.close()
 
 
-# ==========================================
-# Central Application State Manager (JSON)
-# ==========================================
 class AppStateManager:
-    """Manages system configurations and active symbols, syncing to a local JSON file."""
     def __init__(self, file_path: str = "app_state.json"):
         self.file_path = os.path.abspath(file_path)
         self.state = {
@@ -199,11 +193,7 @@ class AppStateManager:
 app_state = AppStateManager()
 
 
-# ==========================================
-# WebSocket Logging Handler
-# ==========================================
 class WebSocketLogHandler(logging.Handler):
-    """Intercepts application logs and broadcasts them to active WebSocket clients."""
     def __init__(self):
         super().__init__()
         self.connections: Set[WebSocket] = set()
@@ -230,15 +220,10 @@ class WebSocketLogHandler(logging.Handler):
 
 ws_log_handler = WebSocketLogHandler()
 
-
-# ==========================================
-# Background Asynchronous Task Database
-# ==========================================
-tasks_db = {}  # task_id -> {"status": "running/completed/failed", "progress": float, "result": dict, "error": str}
+tasks_db = {} 
 
 
 def run_async_background_task(coro_func, *args, **kwargs) -> str:
-    """Registers and schedules a slow task asynchronously without blocking HTTP workers."""
     task_id = str(uuid.uuid4())
     tasks_db[task_id] = {
         "status": "running",
@@ -264,9 +249,6 @@ def run_async_background_task(coro_func, *args, **kwargs) -> str:
     return task_id
 
 
-# ==========================================
-# FastAPI Application & Lifespan Setup
-# ==========================================
 app = FastAPI(title="TradingVBT Core API Gateway")
 
 app.add_middleware(
@@ -277,6 +259,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(runs_router)
+
 zmq_server: Optional[ZMQBridgeServer] = None
 
 
@@ -285,15 +269,17 @@ async def startup_event():
     global zmq_server
     loop = asyncio.get_running_loop()
     
-    # Configure Logging Bridge to WebSocket
     ws_log_handler.loop = loop
     ws_log_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
     logging.getLogger().addHandler(ws_log_handler)
     logging.getLogger().setLevel(logging.INFO)
     
-    # Start ZeroMQ bridge server thread
     zmq_server = ZMQBridgeServer(storage_dir=app_state.state["configurations"]["storage_dir"])
     zmq_server.start()
+
+    init_database_and_runs()
+    sync_database_with_disk()
+    
     logger.info("Lifespan setup completed.")
 
 
@@ -305,9 +291,6 @@ async def shutdown_event():
     logger.info("Application shutdown completed.")
 
 
-# ==========================================
-# Pydantic Schemas
-# ==========================================
 class IngestionRequest(pydantic.BaseModel):
     symbol: str
     timeframe: str
@@ -349,24 +332,31 @@ class OptimizationRequest(pydantic.BaseModel):
     train_ratio: float = 0.8
     embargo: int = 20
     n_trials: int = 30
-    strategy_name: str = "SMA_Crossover"  # 'SMA_Crossover' or 'RSI_Crossover'
+    strategy_name: str = "SMA_Crossover" 
     initial_balance: float = 10000.0
     mmr: float = 0.05
     leverage: float = 2.0
 
 
-# ==========================================
-# REST API Endpoints
-# ==========================================
+class AnalysisRequest(pydantic.BaseModel):
+    exchange: str = "BINANCE"
+    symbol: str
+    timeframe: str
+    start_time: int
+    end_time: int
+    kick_threshold_pct: float = 2.0
 
-# 1. Ingestion Control
+
 async def _ingestion_coro(task_id: str, symbol: str, timeframe: str, days_history: int):
+    if timeframe.lower() != "5m":
+        logger.info(f"Timeframe {timeframe} ignoré pour l'ingestion. Forcé à 5m (Source de vérité).")
+        timeframe = "5m"
+
     end_time = int(time.time() * 1000)
     start_time = end_time - days_history * 24 * 3600 * 1000
     tf_ms = timeframe_to_ms(timeframe)
     total_expected_candles = (end_time - start_time) // tf_ms
 
-    # Register active symbol state
     pair_record = {"symbol": symbol.upper(), "timeframe": timeframe.lower(), "status": "ingesting", "task_id": task_id}
     app_state.state["active_pairs"].append(pair_record)
     app_state.save()
@@ -387,7 +377,6 @@ async def _ingestion_coro(task_id: str, symbol: str, timeframe: str, days_histor
                 storage.append_chunk(chunk)
                 candles_fetched += len(chunk)
                 
-                # Update progress
                 progress = min(99.9, (candles_fetched / max(1, total_expected_candles)) * 100.0)
                 tasks_db[task_id]["progress"] = round(progress, 1)
                 
@@ -398,7 +387,6 @@ async def _ingestion_coro(task_id: str, symbol: str, timeframe: str, days_histor
                     
         return {"candles_fetched": candles_fetched}
     finally:
-        # Update pair state back to idle
         for p in app_state.state["active_pairs"]:
             if p["symbol"] == symbol.upper() and p["timeframe"] == timeframe.lower():
                 p["status"] = "idle"
@@ -407,15 +395,14 @@ async def _ingestion_coro(task_id: str, symbol: str, timeframe: str, days_histor
 
 @app.post("/api/ingestion/start")
 async def start_ingestion(req: IngestionRequest):
-    # Check if symbol is already running
     for p in app_state.state["active_pairs"]:
-        if p["symbol"] == req.symbol.upper() and p["timeframe"] == req.timeframe.lower() and p["status"] == "ingesting":
-            raise HTTPException(status_code=400, detail="Ingestion task already running for this symbol and timeframe.")
+        if p["symbol"] == req.symbol.upper() and p["timeframe"] == "5m" and p["status"] == "ingesting":
+            raise HTTPException(status_code=400, detail="Ingestion task already running for this symbol.")
             
     task_id = run_async_background_task(
         _ingestion_coro,
         symbol=req.symbol,
-        timeframe=req.timeframe,
+        timeframe="5m",
         days_history=req.days_history
     )
     return {"task_id": task_id, "status": "running"}
@@ -426,7 +413,6 @@ async def get_ingestion_status():
     return {"active_pairs": app_state.state["active_pairs"]}
 
 
-# 2. Indicators Meta & UI Schema
 @app.get("/api/indicator/metadata/{func_name}")
 async def get_indicator_metadata(func_name: str):
     try:
@@ -443,10 +429,8 @@ async def get_indicator_schema(func_name: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-# 3. Indicator Calculation
 @app.post("/api/indicator/calculate")
 async def calculate_indicator(req: IndicatorCalculateRequest):
-    # Load prices through ZeroMQ IPC bridge
     arr = load_numpy_via_zmq(req.exchange, req.symbol, req.timeframe, req.start_time, req.end_time)
     
     if len(arr) == 0:
@@ -479,10 +463,8 @@ async def calculate_indicator(req: IndicatorCalculateRequest):
         raise HTTPException(status_code=400, detail=f"Indicator run error: {e}")
 
 
-# 4. Simulation Execution
 @app.post("/api/simulation/run")
 async def run_simulation(req: SimulationRunRequest):
-    # Load close prices via ZeroMQ IPC
     arr = load_numpy_via_zmq(req.exchange, req.symbol, req.timeframe, req.start_time, req.end_time)
     if len(arr) == 0:
         raise HTTPException(status_code=400, detail="No historical prices available for backtest.")
@@ -497,7 +479,6 @@ async def run_simulation(req: SimulationRunRequest):
         )
         
     try:
-        # Determine annualization factor dynamically based on sample timedelta
         tf_ms = timeframe_to_ms(req.timeframe)
         annualization_factor = (365.25 * 24.0 * 3600.0 * 1000.0) / tf_ms
         
@@ -531,9 +512,37 @@ async def run_simulation(req: SimulationRunRequest):
         raise HTTPException(status_code=400, detail=f"Backtest simulation execution failed: {e}")
 
 
-# ==========================================
-# Standard Strategies for WFO Optuna
-# ==========================================
+@app.post("/api/analysis/compute")
+async def compute_analysis(req: AnalysisRequest):
+    arr = load_numpy_via_zmq(req.exchange, req.symbol, req.timeframe, req.start_time, req.end_time)
+    if len(arr) == 0:
+        raise HTTPException(status_code=400, detail="No historical prices available for analysis.")
+    
+    try:
+        df = pd.DataFrame(arr)
+        
+        df = compute_base_features(df)
+        df = detect_kicks(df, req.kick_threshold_pct)
+        df = compute_hmm_regimes(df)
+        
+        transitions = compute_directional_transitions(df)
+        probs = compute_conditional_probabilities(df)
+        pca_clusters = compute_pca_clusters(df)
+        
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df = df.where(pd.notnull(df), None)
+        
+        return {
+            "directional_transitions": transitions,
+            "conditional_probabilities": probs,
+            "pca_clusters": pca_clusters,
+            "timeseries": df.to_dict(orient="list")
+        }
+    except Exception as e:
+        logger.error(f"Analysis computation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Analysis computation failed: {str(e)}")
+
+
 def _wfo_sma_signals_gen(close: np.ndarray, params: dict) -> np.ndarray:
     fast = int(params.get('fast', 10))
     slow = int(params.get('slow', 30))
@@ -564,7 +573,6 @@ def _wfo_rsi_signals_gen(close: np.ndarray, params: dict) -> np.ndarray:
         
     rsi = talib.RSI(close, timeperiod=period)
     
-    # State tracking to sustain crossover signals
     curr_state = 0
     for i in range(period, n):
         if rsi[i] < lower:
@@ -575,21 +583,16 @@ def _wfo_rsi_signals_gen(close: np.ndarray, params: dict) -> np.ndarray:
     return signals
 
 
-# 5. WFO Optimization Execution (Background Task)
 async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
-    # Load price array via ZeroMQ
     arr = load_numpy_via_zmq(req.exchange, req.symbol, req.timeframe, req.start_time, req.end_time)
     if len(arr) == 0:
         raise ValueError("No historical price array returned by ZMQ database bridge.")
         
     close = arr['close']
-    base_times = arr['open_time']
     n_len = len(close)
     
-    # Define splits
     splits = generate_wfo_splits(n_len, req.n_splits, req.train_ratio, req.embargo)
     
-    # Select strategy configuration functions
     if req.strategy_name == "SMA_Crossover":
         signals_gen = _wfo_sma_signals_gen
         def param_space(trial):
@@ -612,7 +615,6 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
     oos_equities = []
     splits_results = []
     
-    # Progress step increments
     step_percent = 100.0 / req.n_splits
     
     for split_idx, s in enumerate(splits):
@@ -624,7 +626,6 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
         
         logger.info(f"Optimizing split {split_idx+1}/{req.n_splits} IS range [{train_start}:{train_end}]...")
         
-        # Optimize segment
         opt_res = optimize_segment(
             close_train=close_train,
             signals_gen_func=signals_gen,
@@ -638,7 +639,6 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
         
         best_params = opt_res["best_params"]
         
-        # Simulate In-Sample (IS) stats
         is_signals = signals_gen(close_train, best_params)
         is_stats = simulate_margin_portfolio(
             close=close_train,
@@ -651,7 +651,6 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
             annualization_factor=annualization_factor
         )
         
-        # Simulate Out-of-Sample (OOS) stats
         oos_signals = signals_gen(close_test, best_params)
         oos_stats = simulate_margin_portfolio(
             close=close_test,
@@ -664,7 +663,6 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
             annualization_factor=annualization_factor
         )
         
-        # Check robustness/drift limits
         ri, is_valid = check_robustness(is_stats, oos_stats, tolerated_drawdown=0.20)
         
         oos_equities.append(oos_stats["equity"])
@@ -680,16 +678,12 @@ async def _wfo_optimization_task(task_id: str, req: OptimizationRequest):
             "oos_return": oos_stats["total_return"]
         })
         
-        # Update progress
         tasks_db[task_id]["progress"] = round((split_idx + 1) * step_percent, 1)
         
-    # Stitch continuous Out-of-Sample performance
     stitched_equity = stitch_oos_performance(oos_equities, initial_balance=req.initial_balance)
     
-    # Calculate aggregate performance metrics of the stitched OOS equity curve
     tot_ret = (stitched_equity[-1] - req.initial_balance) / req.initial_balance
     
-    # MultiIndex / columns values parsing
     return {
         "splits": splits_results,
         "stitched_equity": stitched_equity.tolist(),
@@ -703,7 +697,6 @@ async def optimize_wfo(req: OptimizationRequest):
     return {"task_id": task_id, "status": "running"}
 
 
-# 6. Background Task Status
 @app.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str):
     if task_id not in tasks_db:
@@ -711,9 +704,6 @@ async def get_task_status(task_id: str):
     return tasks_db[task_id]
 
 
-# ==========================================
-# WebSocket Logging Interface
-# ==========================================
 @app.websocket("/api/ws/logs")
 async def websocket_logs(websocket: WebSocket):
     await websocket.accept()
@@ -721,7 +711,6 @@ async def websocket_logs(websocket: WebSocket):
         ws_log_handler.connections.add(websocket)
     try:
         while True:
-            # Maintain connection alive, client sends ping or keeps socket open
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass

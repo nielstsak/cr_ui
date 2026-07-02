@@ -51,6 +51,61 @@ SYNONYMS = {
     'volume': ['volume', 'vol']
 }
 
+# Crypto-optimized sensible defaults for the exhaustive indicator list
+CUSTOM_DEFAULTS = {
+    "SMA": {"timeperiod": 20},
+    "EMA": {"timeperiod": 20},
+    "DEMA": {"timeperiod": 20},
+    "KAMA": {"timeperiod": 20},
+    "T3": {"timeperiod": 20},
+    "TEMA": {"timeperiod": 20},
+    "TRIMA": {"timeperiod": 20},
+    "WMA": {"timeperiod": 20},
+    "LINEARREG": {"timeperiod": 20},
+    "TSF": {"timeperiod": 20},
+    "MA": {"timeperiod": 20, "matype": 0},
+    "BBANDS": {"timeperiod": 20, "nbdevup": 2.0, "nbdevdn": 2.0},
+    "MACD": {"fastperiod": 12, "slowperiod": 26, "signalperiod": 9},
+    "MACDEXT": {"fastperiod": 12, "fastmatype": 0, "slowperiod": 26, "slowmatype": 0, "signalperiod": 9, "signalmatype": 0},
+    "MACDFIX": {"signalperiod": 9},
+    "RSI": {"timeperiod": 14},
+    "CCI": {"timeperiod": 14},
+    "CMO": {"timeperiod": 14},
+    "MOM": {"timeperiod": 14},
+    "ROC": {"timeperiod": 14},
+    "ROCP": {"timeperiod": 14},
+    "ROCR": {"timeperiod": 14},
+    "ROCR100": {"timeperiod": 14},
+    "WILLR": {"timeperiod": 14},
+    "MFI": {"timeperiod": 14},
+    "ADX": {"timeperiod": 14},
+    "ADXR": {"timeperiod": 14},
+    "DX": {"timeperiod": 14},
+    "MINUS_DI": {"timeperiod": 14},
+    "MINUS_DM": {"timeperiod": 14},
+    "PLUS_DI": {"timeperiod": 14},
+    "PLUS_DM": {"timeperiod": 14},
+    "ATR": {"timeperiod": 14},
+    "NATR": {"timeperiod": 14},
+    "STOCH": {"fastk_period": 5, "slowk_period": 3, "slowk_matype": 0, "slowd_period": 3, "slowd_matype": 0},
+    "STOCHF": {"fastk_period": 5, "fastd_period": 3, "fastd_matype": 0},
+    "STOCHRSI": {"timeperiod": 14, "fastk_period": 5, "fastd_period": 3, "fastd_matype": 0},
+    "MAX": {"timeperiod": 30},
+    "MIN": {"timeperiod": 30},
+    "MAXINDEX": {"timeperiod": 30},
+    "MININDEX": {"timeperiod": 30},
+    "MINMAX": {"timeperiod": 30},
+    "MINMAXINDEX": {"timeperiod": 30},
+    "SUM": {"timeperiod": 30},
+    "VAR": {"timeperiod": 30},
+    "STDDEV": {"timeperiod": 30},
+    "BETA": {"timeperiod": 30},
+    "CORREL": {"timeperiod": 30},
+    "AROON": {"timeperiod": 14},
+    "AROONOSC": {"timeperiod": 14},
+    "ULTOSC": {"timeperiod1": 7, "timeperiod2": 14, "timeperiod3": 28}
+}
+
 
 def make_array_fingerprint(arr: np.ndarray) -> tuple:
     """
@@ -60,9 +115,7 @@ def make_array_fingerprint(arr: np.ndarray) -> tuple:
     n = len(arr)
     if n == 0:
         return (arr.dtype, arr.shape, 0)
-    # Sample up to 5 elements (start, end, and middle increments)
     sample_indices = np.linspace(0, n - 1, min(5, n)).astype(np.int64)
-    # Convert samples to a tuple of float/int representations
     samples = tuple(arr[idx] for idx in sample_indices)
     return (arr.dtype, arr.shape, samples)
 
@@ -95,7 +148,7 @@ def make_cache_key(func_name: str, inputs: dict, params: dict, downcast_float32:
 
 def get_talib_metadata(func_name: str) -> dict:
     """
-    Introspects dynamic metadata for any TA-Lib indicator.
+    Introspects dynamic metadata for any TA-Lib indicator and applies custom overrides.
     
     Args:
         func_name: Name of the TA-Lib function (e.g. 'SMA', 'MACD').
@@ -113,11 +166,18 @@ def get_talib_metadata(func_name: str) -> dict:
         )
         
     info = func.info
+    parameters = dict(info.get("parameters", {}))
+    
+    if func_name in CUSTOM_DEFAULTS:
+        for k, v in CUSTOM_DEFAULTS[func_name].items():
+            if k in parameters:
+                parameters[k] = v
+                
     return {
         "name": info.get("name", func_name),
         "group": info.get("group", ""),
         "inputs": dict(info.get("input_names", {})),
-        "parameters": dict(info.get("parameters", {})),
+        "parameters": parameters,
         "outputs": list(info.get("output_names", []))
     }
 
@@ -133,7 +193,6 @@ def get_ui_parameter_schema(func_name: str) -> dict:
     for param_name, default_val in meta["parameters"].items():
         param_schema = {}
         
-        # Determine base types
         if isinstance(default_val, int):
             param_schema["type"] = "integer"
         elif isinstance(default_val, float):
@@ -145,8 +204,7 @@ def get_ui_parameter_schema(func_name: str) -> dict:
             
         param_schema["default"] = default_val
         
-        # Inject standard range/enum constraints
-        if param_name == "matype":
+        if "matype" in param_name.lower():
             param_schema["type"] = "integer"
             param_schema["enum"] = [0, 1, 2, 3, 4, 5, 6, 7, 8]
             param_schema["description"] = (
@@ -231,27 +289,23 @@ class DynamicIndicatorFactory:
                     ...
                 },
                 "columns": [
-                    {"param_name": value, ...},  # Mapping for each column index
+                    {"param_name": value, ...},
                     ...
                 ]
             }
         """
-        # 1. Fetch cache
         cache_key = make_cache_key(func_name, inputs, params, downcast_float32)
         cached_result = _lru_cache.get(cache_key)
         if cached_result is not None:
             logger.debug(f"Indicator '{func_name}' hit in LRU cache.")
             return cached_result
             
-        # 2. Get Vectorbt indicator class (caches generated classes)
         if func_name not in _indicator_classes:
             _indicator_classes[func_name] = vbt.IndicatorFactory.from_talib(func_name)
         IndicatorClass = _indicator_classes[func_name]
         
-        # 3. Resolve input arrays
         run_inputs = resolve_inputs(IndicatorClass, inputs)
         
-        # 4. Generate parameter grid (Cartesian product)
         meta = get_talib_metadata(func_name)
         grid_params = {}
         for p_name, default_val in meta["parameters"].items():
@@ -274,7 +328,6 @@ class DynamicIndicatorFactory:
             f"(Chunking threshold: {max_param_combinations})."
         )
         
-        # 5. Execute calculations in chunks (Memory Limit Guard)
         chunks = [
             combinations[idx:idx + max_param_combinations]
             for idx in range(0, n_combinations, max_param_combinations)
@@ -284,26 +337,21 @@ class DynamicIndicatorFactory:
         final_columns = None
         
         for chunk in chunks:
-            # Reconstruct list of parameter variables for this chunk
             chunk_params = {}
             for idx, p_name in enumerate(param_names):
                 chunk_params[p_name] = [c[idx] for c in chunk]
                 
-            # Run calculations using Vectorbt Pro (param_product=False since we feed it pre-zipped combos)
             res = IndicatorClass.run(**run_inputs, **chunk_params, param_product=False)
             
-            # Save intermediate dataframes
             for out_name in meta["outputs"]:
                 val_df = pd.DataFrame(getattr(res, out_name))
                 outputs_list[out_name].append(val_df)
                 
-        # 6. Concat chunks and downcast output types
         concat_outputs = {}
         df_columns = None
         for out_name in meta["outputs"]:
             df_concat = pd.concat(outputs_list[out_name], axis=1)
             
-            # Track final column index structure
             if df_columns is None:
                 df_columns = df_concat.columns
                 
@@ -312,12 +360,10 @@ class DynamicIndicatorFactory:
                 val_array = val_array.astype(np.float32)
             concat_outputs[out_name] = val_array
             
-        # 7. Map column indices back to parameter values
         list_of_param_dicts = []
         if df_columns is not None:
             if isinstance(df_columns, pd.MultiIndex):
                 names = df_columns.names
-                # Clean names (e.g. remove vbt prefix like 'sma_' from 'sma_timeperiod')
                 prefix = f"{func_name.lower()}_"
                 clean_names = [
                     n[len(prefix):] if n and n.startswith(prefix) else n
@@ -329,7 +375,6 @@ class DynamicIndicatorFactory:
                         for idx in range(len(clean_names))
                     })
             else:
-                # Single parameter indicator
                 name = df_columns.name
                 prefix = f"{func_name.lower()}_"
                 clean_name = name[len(prefix):] if name and name.startswith(prefix) else name
@@ -341,6 +386,5 @@ class DynamicIndicatorFactory:
             "columns": list_of_param_dicts
         }
         
-        # Save cache entry
         _lru_cache.set(cache_key, result)
         return result
