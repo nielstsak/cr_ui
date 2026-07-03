@@ -1,15 +1,13 @@
+# FICHIER : backend/core/resampler.py
 import re
 import numba
 import numpy as np
 
-# Import strict OHLCV dtype
+# Importation du type de données structuré OHLCV pour la compatibilité HDF5
 from backend.data.hdf5_storage import OHLCV_DTYPE
 
-# Pre-defined timeframe conversions to milliseconds
+# Dictionnaire de conversion strict des échelles temporelles (Timeframes) en millisecondes
 TIMEFRAME_TO_MS = {
-    '1s': 1000,
-    '1m': 60000,
-    '3m': 180000,
     '5m': 300000,
     '15m': 900000,
     '30m': 1800000,
@@ -20,25 +18,31 @@ TIMEFRAME_TO_MS = {
     '8h': 28800000,
     '12h': 43200000,
     '1d': 86400000,
-    '1w': 604800000
 }
 
 
 def timeframe_to_ms(timeframe: str) -> int:
     """
-    Parses a timeframe string (e.g., '1m', '5m', '1h', '2d') into milliseconds.
-    Raises ValueError if format is invalid or unsupported.
+    Parse et convertit une chaîne timeframe (ex: '15m', '4h', '1d') en millisecondes.
+    
+    Args:
+        timeframe: La chaîne de caractères du timeframe à convertir.
+        
+    Returns:
+        La valeur équivalente en millisecondes.
+        
+    Raises:
+        ValueError: Si le format du timeframe est invalide ou non supporté.
     """
     tf = timeframe.lower().strip()
     if tf in TIMEFRAME_TO_MS:
         return TIMEFRAME_TO_MS[tf]
         
-    # Matches a digit sequence followed by 's', 'm', 'h', 'd', or 'w'
     match = re.match(r"^(\d+)([smhdw])$", tf)
     if not match:
         raise ValueError(
-            f"Unsupported or invalid timeframe format: '{timeframe}'. "
-            f"Expected format like '15s', '5m', '4h', '1d', etc."
+            f"Format de timeframe non supporté ou invalide : '{timeframe}'. "
+            f"Formats attendus : '5m', '1h', '1d', etc."
         )
         
     value = int(match.group(1))
@@ -56,19 +60,34 @@ def timeframe_to_ms(timeframe: str) -> int:
 
 @numba.njit(nogil=True, parallel=False)
 def resample_ohlcv_jit(
-    in_open_time, in_open, in_high, in_low, in_close, in_volume, in_quote_vol, in_trades,
-    out_open_time, out_open, out_high, out_low, out_close, out_volume, out_quote_vol, out_trades,
-    start_time, target_timeframe_ms, align_close
-):
+    in_open_time: np.ndarray,
+    in_open: np.ndarray,
+    in_high: np.ndarray,
+    in_low: np.ndarray,
+    in_close: np.ndarray,
+    in_volume: np.ndarray,
+    in_quote_vol: np.ndarray,
+    in_trades: np.ndarray,
+    out_open_time: np.ndarray,
+    out_open: np.ndarray,
+    out_high: np.ndarray,
+    out_low: np.ndarray,
+    out_close: np.ndarray,
+    out_volume: np.ndarray,
+    out_quote_vol: np.ndarray,
+    out_trades: np.ndarray,
+    start_time: int,
+    target_timeframe_ms: int,
+    align_close: bool
+) -> None:
     """
-    Strict JIT compiled resampling loop.
-    Maps fine-grained input candles to pre-allocated coarser target arrays.
-    Handles gaps using forward-fill on prices and zero-fill on volumes.
+    Boucle de rééchantillonnage compilée JIT optimisée pour exécution parallèle ou thread-safe.
+    Gère la propagation des prix sur les trous de marché (gaps) et l'agrégation de volume.
     """
     n_in = len(in_open_time)
     n_out = len(out_open_time)
     
-    i = 0  # Sequential search index for source candles
+    i = 0  
     last_close = 0.0
     if n_in > 0:
         last_close = in_close[0]
@@ -86,7 +105,7 @@ def resample_ohlcv_jit(
         quote_vol_val = 0.0
         trades_val = 0
         
-        # Sift through contiguous sorted source candles falling within [p_start, p_end[
+        # Agrégation des données dans la fenêtre temporelle cible
         while i < n_in and in_open_time[i] < p_end:
             t = in_open_time[i]
             if t >= p_start:
@@ -117,7 +136,7 @@ def resample_ohlcv_jit(
             out_trades[j] = trades_val
             last_close = close_val
         else:
-            # Market gap: propagate last close and reset counters
+            # Remplissage par défaut en cas de trou de marché (forward fill)
             out_open[j] = last_close
             out_high[j] = last_close
             out_low[j] = last_close
@@ -126,7 +145,6 @@ def resample_ohlcv_jit(
             out_quote_vol[j] = 0.0
             out_trades[j] = 0
             
-        # Causal Alignment to avoid look-ahead bias
         if align_close:
             out_open_time[j] = p_end
         else:
@@ -135,37 +153,34 @@ def resample_ohlcv_jit(
 
 def resample_ohlcv(data: np.ndarray, target_timeframe: str, align: str = 'close') -> np.ndarray:
     """
-    Public wrapper function for JIT resampling.
+    Rééchantillonne des données OHLCV brutes vers une unité de temps supérieure cible.
     
     Args:
-        data: A C-contiguous NumPy structured array with OHLCV_DTYPE.
-        target_timeframe: Timeframe code (e.g. '5m', '1h', '1d').
-        align: 'close' for causal alignment to Close Time (prevents look-ahead bias),
-               'open' for alignment to Open Time.
-               
+        data: Tableau structuré numpy de type OHLCV_DTYPE.
+        target_timeframe: Timeframe cible (ex: '15m', '4h', '1d').
+        align: Type d'alignement temporel ('open' ou 'close').
+        
     Returns:
-        A resampled structured NumPy array matching OHLCV_DTYPE.
+        Un tableau numpy structuré contenant les bougies rééchantillonnées.
     """
     if not isinstance(data, np.ndarray):
-        raise TypeError("Input data must be a NumPy array.")
+        raise TypeError("Les données sources doivent être sous forme de tableau NumPy.")
     if data.dtype != OHLCV_DTYPE:
-        raise ValueError(f"Input array must match strict OHLCV_DTYPE: {OHLCV_DTYPE}.")
+        raise ValueError("Le format de données doit correspondre au type structuré OHLCV strict.")
     if len(data) == 0:
         return np.empty(0, dtype=OHLCV_DTYPE)
         
     align_close = align.lower().strip() == 'close'
     target_ms = timeframe_to_ms(target_timeframe)
     
-    # Check that target timeframe is indeed larger than source timeframe (implied by first two timestamps)
     if len(data) > 1:
         source_ms = data['open_time'][1] - data['open_time'][0]
         if target_ms < source_ms:
             raise ValueError(
-                f"Target timeframe '{target_timeframe}' ({target_ms}ms) is smaller than "
-                f"source data timeframe ({source_ms}ms)."
+                f"Le timeframe cible '{target_timeframe}' ({target_ms}ms) doit être strictement "
+                f"supérieur au timeframe source ({source_ms}ms)."
             )
             
-    # Calculate bounds and sizes to pre-allocate output array (prevents memory allocation in JIT loops)
     first_time = data['open_time'][0]
     last_time = data['open_time'][-1]
     
@@ -173,11 +188,8 @@ def resample_ohlcv(data: np.ndarray, target_timeframe: str, align: str = 'close'
     end_t = (last_time // target_ms) * target_ms
     
     total_periods = int((end_t - start_t) // target_ms) + 1
-    
-    # Pre-allocate output structured array
     out_data = np.empty(total_periods, dtype=OHLCV_DTYPE)
     
-    # Call JIT compiler loop passing contiguous memory column views
     resample_ohlcv_jit(
         data['open_time'], data['open'], data['high'], data['low'], data['close'], data['volume'], data['quote_vol'], data['trades'],
         out_data['open_time'], out_data['open'], out_data['high'], out_data['low'], out_data['close'], out_data['volume'], out_data['quote_vol'], out_data['trades'],
