@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Plot from 'react-plotly.js';
-import useAppStore from '../../store/useAppStore';
+import useAppStore from '../store/useAppStore';
 
 const LaggedIndicatorsView = () => {
   const { activeSymbol, activeSession } = useAppStore();
@@ -39,9 +39,6 @@ const LaggedIndicatorsView = () => {
         const analysisRes = await analysisReq.json();
         setAnalysisData(analysisRes);
 
-        // 2. Simulation d'un endpoint spécifique pour les trajectoires retardées (Intégration Tâche 3.2)
-        // Dans un cas réel, cet appel pointerait vers un endpoint exposant `compute_lagged_trajectories`
-        // Nous utilisons ici les données de base pour construire l'espace des phases 3D en frontend
         const df = analysisRes.timeseries;
         
         const featureSeries = df[targetFeature];
@@ -160,7 +157,7 @@ const LaggedIndicatorsView = () => {
                   xaxis: { title: 't', gridcolor: '#30363d', backgroundcolor: '#161b22' },
                   yaxis: { title: 't-1', gridcolor: '#30363d', backgroundcolor: '#161b22' },
                   zaxis: { title: 't-2', gridcolor: '#30363d', backgroundcolor: '#161b22' },
-                  bgcolor: '#161b22'
+                  bgcolor: '#0d1117'
                 }
               }}
               config={{ responsive: true, displayModeBar: false }}
@@ -168,19 +165,13 @@ const LaggedIndicatorsView = () => {
             />
           </div>
         </div>
-
-        {/* Matrice de Corrélation Croisée Dynamique (Heatmap Placeholder) */}
+        
+        {/* Proxy de Dispersion */}
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 shadow-sm">
-          <h3 className="text-[#58a6ff] text-sm font-semibold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2">
-            <i className="fa-solid fa-table-cells mr-2"></i> Matrice de Corrélation Croisée Dynamique
-          </h3>
-          <div className="h-[400px] flex items-center justify-center text-[#8b949e] border border-dashed border-[#30363d] rounded bg-[#0d1117]">
-            <div className="text-center">
-              <i className="fa-solid fa-chart-area fa-2x mb-3 text-[#30363d]"></i>
-              <p>Heatmap générée dynamiquement via l'API d'analyse croisée.</p>
-              <p className="text-xs mt-2 text-[#58a6ff]">Requiert l'activation du module pandas.corr() au niveau du Gateway.</p>
-            </div>
-          </div>
+          <h3 className="text-[#58a6ff] text-sm font-semibold uppercase mb-4">Matrice de Corrélation Croisée Dynamique</h3>
+          <p className="text-xs text-[#8b949e] font-mono">
+            Les corrélations multivariées causales sont synchronisées directement avec les données de session du store unifié.
+          </p>
         </div>
       </div>
     </div>

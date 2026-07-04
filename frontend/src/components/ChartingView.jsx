@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Plot from 'react-plotly.js';
-import useAppStore from '../../store/useAppStore';
+import useAppStore from '../store/useAppStore';
 
 const ChartingView = () => {
   const { activeSymbol, activeSession, selectedOverlays, selectedOscillators, indicatorParams } = useAppStore();
@@ -144,18 +144,18 @@ const ChartingView = () => {
   });
 
   // Subplots pour les Oscillateurs (Y3, Y4, etc.)
-  selectedOscillators.forEach((ind, index) => {
-    const yAxisRef = `y${index + 3}`;
-    if (indicators[ind]) {
-      Object.keys(indicators[ind]).forEach((outName) => {
+  selectedOscillators.forEach((name, idx) => {
+    const outputs = indicators[name];
+    if (outputs) {
+      Object.keys(outputs).forEach((outName) => {
         traces.push({
           x: timeArray,
-          y: indicators[ind][outName],
+          y: outputs[outName],
           type: 'scatter',
           mode: 'lines',
           xaxis: 'x',
-          yaxis: yAxisRef,
-          name: `${ind} (${outName})`,
+          yaxis: `y${idx + 3}`,
+          name: `${name} (${outName})`,
           line: { width: 1.2 }
         });
       });

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Plot from 'react-plotly.js';
-import useAppStore from '../../store/useAppStore';
+import useAppStore from '../store/useAppStore';
 
 const VolatilityView = () => {
   const { activeSymbol, activeSession } = useAppStore();

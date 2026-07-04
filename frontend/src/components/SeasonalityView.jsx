@@ -1,10 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import Plot from 'react-plotly.js';
-import useAppStore from '../../store/useAppStore';
+import useAppStore from '../store/useAppStore';
 
 const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
+/**
+ * Composant SeasonalityView - Profils Temporels de Trading.
+ * Permet l'agrégation, le calcul des heatmaps de distribution horaire,
+ * et la classification radar des sessions globales d'échange (Asie, Europe, US).
+ */
 const SeasonalityView = () => {
   const { activeSymbol, activeSession } = useAppStore();
   
@@ -33,15 +38,14 @@ const SeasonalityView = () => {
           })
         });
         
-        if (!response.ok) throw new Error('Erreur lors de la récupération des données d\'analyse');
+        if (!response.ok) throw new Error('Échec du calcul des métriques de saisonnalité.');
         const data = await response.json();
         const df = data.timeseries;
         
         // ---------------------------------------------------------
-        // Agrégations JavaScript (remplacement de Pandas)
+        // Traitement Vectoriel des profils temporels en JS
         // ---------------------------------------------------------
         
-        // 1. Préparation des données enrichies
         const enriched = df.open_time.map((t, i) => {
           const date = new Date(t);
           const hour = date.getUTCHours();
@@ -54,17 +58,17 @@ const SeasonalityView = () => {
             day: DAYS_OF_WEEK[date.getUTCDay()],
             month: MONTHS[date.getUTCMonth()],
             session,
-            isKick: ['High Kick', 'Low Kick', 'Both'].includes(df.kick_type[i]) ? 1 : 0,
-            upperWick: df.upper_wick[i],
-            lowerWick: df.lower_wick[i],
-            returns: df.returns[i],
-            volume: df.volume[i],
-            spread: df.spread[i],
-            bodySize: df.body_size[i]
+            isKick: ['High Kick', 'Low Kick', 'Both'].includes(df.kick_type?.[i]) ? 1 : 0,
+            upperWick: df.upper_wick?.[i] || 0,
+            lowerWick: df.lower_wick?.[i] || 0,
+            returns: df.returns?.[i] || 0,
+            volume: df.volume?.[i] || 0,
+            spread: df.spread?.[i] || 0,
+            bodySize: df.body_size?.[i] || 0
           };
         });
 
-        // 2. Heatmap (Jour vs Heure -> Fréquence des Kicks)
+        // 1. Matrice d'activité (Jour vs Heure -> Ratio d'anomalies de volatilité)
         const heatmapGrid = Array(7).fill(0).map(() => Array(24).fill(0));
         const heatmapCounts = Array(7).fill(0).map(() => Array(24).fill(0));
         
@@ -80,7 +84,7 @@ const SeasonalityView = () => {
         const hmY = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
         const hmX = Array(24).fill(0).map((_, i) => `${i.toString().padStart(2, '0')}:00`);
 
-        // 3. Profil Intra-journalier des Mèches
+        // 2. Profil d'absorption des mèches par heure (Mèches hautes/basses moyennes)
         const wicksByHour = Array(24).fill(0).map(() => ({ up: 0, low: 0, count: 0 }));
         enriched.forEach(row => {
           wicksByHour[row.hour].up += row.upperWick;
@@ -91,14 +95,14 @@ const SeasonalityView = () => {
         const wickUpY = wicksByHour.map(w => w.count > 0 ? (w.up / w.count) * 100 : 0);
         const wickLowY = wicksByHour.map(w => w.count > 0 ? (w.low / w.count) * 100 : 0);
 
-        // 4. Boxplots Mensuels (Rendements absolus)
+        // 3. Distribution de dispersion mensuelle (Rendements absolus)
         const returnsByMonth = {};
         enriched.forEach(row => {
           if (!returnsByMonth[row.month]) returnsByMonth[row.month] = [];
           if (row.returns !== null) returnsByMonth[row.month].push(Math.abs(row.returns) * 100);
         });
 
-        // 5. Radar (Sessions)
+        // 4. Modélisation Radar de la signature des 3 sessions
         const normalize = (arr) => {
           const min = Math.min(...arr);
           const max = Math.max(...arr);
@@ -126,7 +130,7 @@ const SeasonalityView = () => {
         const radarData = Object.keys(sessionAgg).map(sess => {
           const count = sessionCounts[sess] || 1;
           const means = sessionAgg[sess].map(v => v / count);
-          means.push(means[0]); // Fermer le polygone
+          means.push(means[0]); // Fermeture de la ligne radar
           return { name: sess, r: means };
         });
 
@@ -144,37 +148,45 @@ const SeasonalityView = () => {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-full p-10 text-[#8b949e]">
-        <i className="fa-solid fa-circle-notch fa-spin fa-2x mr-4"></i>
-        <span>Agrégation des données saisonnières en cours...</span>
+      <div className="flex items-center justify-center h-64 text-[#8b949e] text-sm">
+        <i className="fa-solid fa-circle-notch fa-spin mr-3 text-brand-500"></i>
+        Agrégation temporelle des données et calcul des profils de marché...
       </div>
     );
   }
 
   if (error) {
-    return <div className="p-10 text-[#f85149]">Erreur: {error}</div>;
+    return (
+      <div className="p-6 bg-[#161b22] border border-red-950 text-red-400 rounded-lg text-xs font-mono">
+        <i className="fa-solid fa-triangle-exclamation mr-2"></i> Erreur : {error}
+      </div>
+    );
   }
 
   if (!seasonalityData) {
-    return <div className="p-10 text-[#8b949e]">Veuillez sélectionner un run actif pour afficher l'analyse.</div>;
+    return (
+      <div className="p-10 text-center text-[#8b949e] text-xs font-mono">
+        Aucun run de données actif détecté. Sélectionnez une session d'analyse pour afficher les saisonnalités.
+      </div>
+    );
   }
 
   const { hmX, hmY, hmZ, hourX, wickUpY, wickLowY, returnsByMonth, radarData } = seasonalityData;
 
   const radarVars = ['Volume', 'Spread', 'Upper Wick', 'Lower Wick', 'Body Size', 'Volume'];
   const radarColors = {
-    'Asie': { line: '#f1c40f', fill: 'rgba(241, 196, 15, 0.4)' },
-    'Europe': { line: '#1f6feb', fill: 'rgba(31, 111, 235, 0.4)' },
-    'US': { line: '#e74c3c', fill: 'rgba(231, 76, 60, 0.4)' }
+    'Asie': { line: '#f1c40f', fill: 'rgba(241, 196, 21, 0.2)' },
+    'Europe': { line: '#1f6feb', fill: 'rgba(31, 111, 235, 0.2)' },
+    'US': { line: '#e74c3c', fill: 'rgba(231, 76, 60, 0.2)' }
   };
 
   return (
     <div className="p-6 space-y-6">
       
-      {/* Heatmap */}
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 shadow-sm">
-        <h3 className="text-[#58a6ff] text-sm font-semibold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2">
-          <i className="fa-solid fa-fire mr-2"></i> Heatmap Horaire & Hebdomadaire (Fréquence Kicks)
+      {/* 1. Heatmap d'activité Jour / Heure */}
+      <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm">
+        <h3 className="text-white text-xs font-bold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2 flex items-center">
+          <i className="fa-solid fa-fire mr-2 text-[#e74c3c]"></i> Heatmap d'activité Jour / Heure (Fréquence Kicks de Volatilité)
         </h3>
         <div className="h-[320px]">
           <Plot
@@ -187,7 +199,7 @@ const SeasonalityView = () => {
             layout={{
               margin: { l: 80, r: 20, t: 20, b: 40 },
               paper_bgcolor: '#161b22', plot_bgcolor: '#161b22',
-              xaxis: { title: 'Heure (UTC)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
+              xaxis: { title: 'Heure de transaction (UTC)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
               yaxis: { gridcolor: '#30363d', tickfont: { color: '#8b949e' } }
             }}
             config={{ responsive: true, displayModeBar: false }}
@@ -196,12 +208,13 @@ const SeasonalityView = () => {
         </div>
       </div>
 
+      {/* Ligne 2 : Profil de mèche & Radar de session */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         
-        {/* Wick Profile */}
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 shadow-sm">
-          <h3 className="text-[#58a6ff] text-sm font-semibold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2">
-            <i className="fa-solid fa-arrows-up-down mr-2"></i> Profil Intra-Journalier des Mèches
+        {/* Profil intraday de mèche */}
+        <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm">
+          <h3 className="text-white text-xs font-bold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2 flex items-center">
+            <i className="fa-solid fa-clock mr-2 text-[#58a6ff]"></i> Profil horaire de mèche (Taux de Rejet intra-journalier)
           </h3>
           <div className="h-[300px]">
             <Plot
@@ -212,8 +225,8 @@ const SeasonalityView = () => {
               layout={{
                 margin: { l: 40, r: 20, t: 20, b: 40 },
                 paper_bgcolor: '#161b22', plot_bgcolor: '#161b22', showlegend: true,
-                xaxis: { title: 'Heures de la journée (UTC)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
-                yaxis: { title: 'Mèche moyenne (%)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
+                xaxis: { title: 'Heure de la journée (UTC)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
+                yaxis: { title: 'Taille moyenne de mèche (%)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
                 legend: { orientation: 'h', y: 1.1, font: { color: '#c9d1d9' } }
               }}
               config={{ responsive: true, displayModeBar: false }}
@@ -222,10 +235,10 @@ const SeasonalityView = () => {
           </div>
         </div>
 
-        {/* Radar Sessions */}
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 shadow-sm">
-          <h3 className="text-[#58a6ff] text-sm font-semibold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2">
-            <i className="fa-solid fa-radar mr-2"></i> Radar des Signatures Temporelles
+        {/* Radar de signature comportementale */}
+        <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm">
+          <h3 className="text-white text-xs font-bold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2 flex items-center">
+            <i className="fa-solid fa-radar mr-2 text-[#58a6ff]"></i> Signature comportementale par session géographique
           </h3>
           <div className="h-[300px]">
             <Plot
@@ -257,10 +270,10 @@ const SeasonalityView = () => {
 
       </div>
 
-      {/* Boxplots Mensuels */}
-      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-5 shadow-sm">
-        <h3 className="text-[#58a6ff] text-sm font-semibold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2">
-          <i className="fa-regular fa-calendar mr-2"></i> Boxplots Mensuels de Dispersion
+      {/* 3. Dispersion mensuelle */}
+      <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm">
+        <h3 className="text-white text-xs font-bold uppercase tracking-wider mb-4 border-b border-[#30363d] pb-2 flex items-center">
+          <i className="fa-regular fa-calendar-days mr-2 text-[#58a6ff]"></i> Volatilité &amp; Distribution de la dispersion par Mois
         </h3>
         <div className="h-[320px]">
           <Plot
@@ -276,7 +289,7 @@ const SeasonalityView = () => {
               margin: { l: 40, r: 20, t: 20, b: 40 },
               paper_bgcolor: '#161b22', plot_bgcolor: '#161b22', showlegend: false,
               xaxis: { gridcolor: '#30363d', tickfont: { color: '#8b949e' } },
-              yaxis: { title: 'Rendement absolu (%)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } }
+              yaxis: { title: 'Dispersion des rendements (%)', gridcolor: '#30363d', tickfont: { color: '#8b949e' } }
             }}
             config={{ responsive: true, displayModeBar: false }}
             style={{ width: '100%', height: '100%' }}

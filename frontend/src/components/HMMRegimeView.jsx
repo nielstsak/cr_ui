@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Plot from 'react-plotly.js';
-import useAppStore from '../../store/useAppStore';
+import useAppStore from '../store/useAppStore';
 
 const HMMRegimeView = () => {
   const { activeSymbol, activeSession } = useAppStore();
@@ -57,7 +57,7 @@ const HMMRegimeView = () => {
       startTime = times[i];
     }
   }
-  shapes.push({ type: 'rect', x0: startTime, x1: times[times.length-1], fillcolor: regColors[currState], line: { width: 0 } });
+  shapes.push({ type: 'rect', x0: startTime, x1: times[times.length - 1], fillcolor: regColors[currState], line: { width: 0 } });
 
   return (
     <div className="p-6 space-y-6">
