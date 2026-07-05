@@ -1,53 +1,144 @@
-// FICHIER : frontend/src/store/useAppStore.js
 import { create } from 'zustand';
 
-/**
- * Store global de gestion de l'état (Zustand) pour l'interface de pilotage.
- * Orchestre les communications synchrones/asynchrones avec la Gateway API.
- */
 const useAppStore = create((set, get) => ({
   symbols: [],
   activeSymbol: 'BTCUSDT',
   sessions: [],
   activeSession: null,
   localPairs: [],
-  descStats: null, // Données statistiques descriptives MTF pour la table d'informations (T47)
+  descStats: null,
+  vbtInfo: null,
 
   isLoading: false,
   error: null,
 
-  selectedOverlays: ['SMA'],
-  selectedOscillators: ['RSI'],
-  indicatorParams: {
-    SMA: { timeperiod: 20 },
-    RSI: { timeperiod: 14 }
-  },
+  // Liste des indicateurs calculés et injectés dans HDF5: { "BTCUSDT": ["MACD", "RSI"] }
+  calculatedIndicators: {}, 
+  
+  // Cache des métadonnées TA-Lib pour connaître les colonnes de sortie
+  indicatorMetadata: {},
+
+  // Configurations d'affichage imbriquées : 
+  // { "BTCUSDT": { "MACD": { "5m": { "MACD_MACD": { color: "#fff", position: "subchart", type: "lines", width: 1.5, opacity: 1 } } } } }
+  displayedIndicators: {},
 
   setActiveSymbol: (symbol) => {
     set({ activeSymbol: symbol });
     get().fetchSessions(symbol);
     get().fetchStats(symbol);
+    get().fetchVbtInfo(symbol);
   },
 
   setActiveSession: (session) => set({ activeSession: session }),
 
-  setSelectedOverlays: (overlays) => set({ selectedOverlays: overlays }),
-
-  setSelectedOscillators: (oscillators) => set({ selectedOscillators: oscillators }),
-
-  setIndicatorParam: (indicator, paramName, value) => set((state) => ({
-    indicatorParams: {
-      ...state.indicatorParams,
-      [indicator]: {
-        ...(state.indicatorParams[indicator] || {}),
-        [paramName]: value
+  // --- ACTIONS INDICATEURS ---
+  
+  fetchIndicatorMetadata: async (indName) => {
+    const metaCache = get().indicatorMetadata;
+    if (metaCache[indName]) return metaCache[indName];
+    
+    try {
+      const res = await fetch(`http://localhost:8000/api/indicator/metadata/${indName}`);
+      if (res.ok) {
+        const data = await res.json();
+        set(state => ({ indicatorMetadata: { ...state.indicatorMetadata, [indName]: data } }));
+        return data;
       }
+    } catch (e) {
+      console.error("Erreur meta:", e);
     }
-  })),
+    return null;
+  },
 
-  /**
-   * Récupère la liste globale des symboles indexés dans le moteur runs.db
-   */
+  applyIndicators: async (symbol, indicatorsList) => {
+    set({ isLoading: true });
+    try {
+      const response = await fetch('http://localhost:8000/api/indicators/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, indicators: indicatorsList })
+      });
+      
+      if (!response.ok) throw new Error("Échec de l'application des indicateurs.");
+      
+      set((state) => ({
+        calculatedIndicators: { ...state.calculatedIndicators, [symbol]: indicatorsList }
+      }));
+      
+      // Purge des configs d'affichage pour les indicateurs qui ont été retirés
+      set((state) => {
+        const symbolConfigs = { ...(state.displayedIndicators[symbol] || {}) };
+        Object.keys(symbolConfigs).forEach(ind => {
+          if (!indicatorsList.includes(ind)) delete symbolConfigs[ind];
+        });
+        return { displayedIndicators: { ...state.displayedIndicators, [symbol]: symbolConfigs } };
+      });
+      
+    } catch (error) {
+      set({ error: error.message });
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  // Active ou désactive l'affichage d'une courbe spécifique
+  toggleIndicatorOutput: (symbol, indName, tf, outCol, defaultConfig) => {
+    set((state) => {
+      const symData = state.displayedIndicators[symbol] || {};
+      const indData = symData[indName] || {};
+      const tfData = indData[tf] || {};
+
+      if (tfData[outCol]) {
+        // Suppression
+        const newTfData = { ...tfData };
+        delete newTfData[outCol];
+        return { 
+          displayedIndicators: { 
+            ...state.displayedIndicators, 
+            [symbol]: { ...symData, [indName]: { ...indData, [tf]: newTfData } } 
+          } 
+        };
+      } else {
+        // Ajout
+        return { 
+          displayedIndicators: { 
+            ...state.displayedIndicators, 
+            [symbol]: { ...symData, [indName]: { ...indData, [tf]: { ...tfData, [outCol]: defaultConfig } } } 
+          } 
+        };
+      }
+    });
+  },
+
+  // Modifie la couleur, l'épaisseur, etc., d'une courbe spécifique
+  updateIndicatorOutputConfig: (symbol, indName, tf, outCol, key, value) => {
+    set((state) => {
+      const symData = state.displayedIndicators[symbol] || {};
+      const indData = symData[indName] || {};
+      const tfData = indData[tf] || {};
+      const config = tfData[outCol];
+      
+      if (!config) return state;
+
+      return {
+        displayedIndicators: {
+          ...state.displayedIndicators,
+          [symbol]: {
+            ...symData,
+            [indName]: {
+              ...indData,
+              [tf]: {
+                ...tfData,
+                [outCol]: { ...config, [key]: value }
+              }
+            }
+          }
+        }
+      };
+    });
+  },
+
+  // --- ACTIONS SYSTEME ---
   fetchSymbols: async () => {
     set({ isLoading: true, error: null });
     try {
@@ -55,113 +146,104 @@ const useAppStore = create((set, get) => ({
       if (!response.ok) throw new Error('Échec de la récupération des symboles.');
       const symbols = await response.json();
       set({ symbols, isLoading: false });
-      
       if (symbols.length > 0) {
         const currentSymbol = get().activeSymbol;
         const targetSymbol = symbols.includes(currentSymbol) ? currentSymbol : symbols[0];
         get().setActiveSymbol(targetSymbol);
       }
-    } catch (error) {
-      set({ error: error.message, isLoading: false });
-    }
+    } catch (error) { set({ error: error.message, isLoading: false }); }
   },
 
-  /**
-   * Récupère les sessions actives du symbole courant
-   */
   fetchSessions: async (symbol) => {
-    set({ isLoading: true, error: null });
     try {
       const response = await fetch(`http://localhost:8000/api/runs/sessions/${symbol}`);
-      if (!response.ok) throw new Error('Échec de la récupération des sessions.');
       const sessions = await response.json();
-      set({ sessions, isLoading: false });
-      
-      if (sessions.length > 0) {
-        get().setActiveSession(sessions[0]);
-      } else {
-        get().setActiveSession(null);
-      }
-    } catch (error) {
-      set({ error: error.message, isLoading: false });
-    }
+      set({ sessions });
+      if (sessions.length > 0) get().setActiveSession(sessions[0]);
+    } catch (error) {}
   },
 
-  /**
-   * Récupère la liste des paires stockées localement et leurs unités de temps associées (T46)
-   */
   fetchLocalPairs: async () => {
     try {
       const response = await fetch('http://localhost:8000/api/ingestion/status');
-      if (!response.ok) throw new Error('Impossible de charger le statut des paires.');
       const data = await response.json();
       set({ localPairs: data.active_pairs });
-    } catch (err) {
-      console.error("Erreur de synchronisation locale de paires :", err);
-    }
+    } catch (err) {}
   },
 
-  /**
-   * Récupère les données descriptives analytiques MTF pour le tableau d'informations (T47)
-   */
   fetchStats: async (symbol) => {
     if (!symbol) return;
     try {
       const response = await fetch(`http://localhost:8000/api/ingestion/stats/${symbol}`);
-      if (!response.ok) {
-        set({ descStats: null });
-        return;
-      }
+      if (!response.ok) return set({ descStats: null });
       const stats = await response.json();
       set({ descStats: stats });
-    } catch (err) {
-      console.error(`Erreur d'analyse descriptive pour ${symbol} :`, err);
-      set({ descStats: null });
-    }
+    } catch (err) { set({ descStats: null }); }
   },
 
-  /**
-   * Action de purge d'un symbole sur disque et en base SQL (T46)
-   */
-  deleteSymbol: async (symbol) => {
+  fetchVbtInfo: async (symbol) => {
+    if (!symbol) return;
     try {
-      const response = await fetch(`http://localhost:8000/api/ingestion/delete/${symbol}`, {
-        method: "DELETE"
-      });
-      if (response.ok) {
-        get().fetchLocalPairs();
-        set({ descStats: null });
-        get().fetchSymbols();
-      } else {
-        const data = await response.json();
-        throw new Error(data.detail || "La suppression a échoué.");
-      }
-    } catch (err) {
-      set({ error: err.message });
-    }
+      const response = await fetch(`http://localhost:8000/api/ingestion/vbt-info/${symbol}`);
+      if (!response.ok) return set({ vbtInfo: null });
+      const data = await response.json();
+      set({ vbtInfo: data });
+    } catch (err) { set({ vbtInfo: null }); }
   },
 
-  /**
-   * Action d'actualisation locale MTF (T46)
-   */
-  refreshSymbol: async (symbol) => {
+  executeVbtFetch: async (fetchParams) => {
+    set({ isLoading: true, error: null });
     try {
-      const response = await fetch(`http://localhost:8000/api/ingestion/refresh/${symbol}`, {
-        method: "POST"
+      const response = await fetch('http://localhost:8000/api/ingestion/vbt-fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: fetchParams.symbol.toUpperCase().replace('/', ''),
+          client: fetchParams.client || null,
+          start: fetchParams.start || null,
+          end: fetchParams.end || null,
+          timeframe: fetchParams.timeframe || null,
+          limit: fetchParams.limit ? parseInt(fetchParams.limit, 10) : null,
+          delay: fetchParams.delay ? parseFloat(fetchParams.delay) : null,
+          show_progress: !!fetchParams.show_progress
+        })
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Échec de l'actualisation.");
-      get().fetchLocalPairs();
+      if (!response.ok) throw new Error(data.detail || "L'acquisition a échoué.");
       return data.task_id;
-    } catch (err) {
-      set({ error: err.message });
+    } catch (error) {
+      set({ error: error.message, isLoading: false });
       return null;
     }
   },
 
-  /**
-   * Action de génération d'une unité de temps manquante par rééchantillonnage de précision
-   */
+  deleteSymbol: async (symbol) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/ingestion/delete/${symbol}`, { method: "DELETE" });
+      if (response.ok) {
+        get().fetchLocalPairs();
+        set((state) => {
+          const newCalc = { ...state.calculatedIndicators };
+          const newDisp = { ...state.displayedIndicators };
+          delete newCalc[symbol];
+          delete newDisp[symbol];
+          return { descStats: null, vbtInfo: null, calculatedIndicators: newCalc, displayedIndicators: newDisp };
+        });
+        get().fetchSymbols();
+      }
+    } catch (err) {}
+  },
+
+  refreshSymbol: async (symbol) => {
+    try {
+      const response = await fetch(`http://localhost:8000/api/ingestion/refresh/${symbol}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail);
+      get().fetchLocalPairs();
+      return data.task_id;
+    } catch (err) { return null; }
+  },
+
   addTimeframe: async (symbol, targetTf) => {
     try {
       const response = await fetch('http://localhost:8000/api/ingestion/add-timeframe', {
@@ -170,11 +252,18 @@ const useAppStore = create((set, get) => ({
         body: JSON.stringify({ symbol, target_timeframe: targetTf })
       });
       if (response.ok) {
-        get().fetchLocalPairs();
-        get().fetchStats(symbol);
+        await get().fetchLocalPairs();
+        await get().fetchStats(symbol);
+        await get().fetchVbtInfo(symbol);
+        
+        // Applique les indicateurs déjà calculés sur le nouveau timeframe
+        const calcInds = get().calculatedIndicators[symbol] || [];
+        if (calcInds.length > 0) {
+          await get().applyIndicators(symbol, calcInds);
+        }
       } else {
         const data = await response.json();
-        throw new Error(data.detail || "Échec de l'ajout d'unité de temps.");
+        throw new Error(data.detail);
       }
     } catch (err) {
       set({ error: err.message });
