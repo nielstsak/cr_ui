@@ -1,3 +1,4 @@
+// FICHIER : frontend/src/store/useAppStore.js
 import { create } from 'zustand';
 
 const useAppStore = create((set, get) => ({
@@ -12,14 +13,16 @@ const useAppStore = create((set, get) => ({
   isLoading: false,
   error: null,
 
-  // Liste des indicateurs calculés et injectés dans HDF5: { "BTCUSDT": ["MACD", "RSI"] }
+  // Liste des indicateurs détectés sur le disque
   calculatedIndicators: {}, 
   
-  // Cache des métadonnées TA-Lib pour connaître les colonnes de sortie
+  // Métadonnées d'outputs
   indicatorMetadata: {},
+  
+  // Catégorisation TA-Lib (Overlap, Momentum...)
+  indicatorGroups: {}, 
 
-  // Configurations d'affichage imbriquées : 
-  // { "BTCUSDT": { "MACD": { "5m": { "MACD_MACD": { color: "#fff", position: "subchart", type: "lines", width: 1.5, opacity: 1 } } } } }
+  // Configuration visuelle
   displayedIndicators: {},
 
   setActiveSymbol: (symbol) => {
@@ -31,8 +34,18 @@ const useAppStore = create((set, get) => ({
 
   setActiveSession: (session) => set({ activeSession: session }),
 
-  // --- ACTIONS INDICATEURS ---
+  // --- ACTIONS INDICATEURS AUTOMATISÉS ---
   
+  fetchIndicatorGroups: async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/indicators/groups');
+      if (res.ok) {
+        const groups = await res.json();
+        set({ indicatorGroups: groups });
+      }
+    } catch (e) { console.error("Erreur récupération groupes:", e); }
+  },
+
   fetchIndicatorMetadata: async (indName) => {
     const metaCache = get().indicatorMetadata;
     if (metaCache[indName]) return metaCache[indName];
@@ -50,29 +63,17 @@ const useAppStore = create((set, get) => ({
     return null;
   },
 
-  applyIndicators: async (symbol, indicatorsList) => {
+  applyIndicators: async (symbol) => {
     set({ isLoading: true });
     try {
       const response = await fetch('http://localhost:8000/api/indicators/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, indicators: indicatorsList })
+        body: JSON.stringify({ symbol })
       });
       
-      if (!response.ok) throw new Error("Échec de l'application des indicateurs.");
-      
-      set((state) => ({
-        calculatedIndicators: { ...state.calculatedIndicators, [symbol]: indicatorsList }
-      }));
-      
-      // Purge des configs d'affichage pour les indicateurs qui ont été retirés
-      set((state) => {
-        const symbolConfigs = { ...(state.displayedIndicators[symbol] || {}) };
-        Object.keys(symbolConfigs).forEach(ind => {
-          if (!indicatorsList.includes(ind)) delete symbolConfigs[ind];
-        });
-        return { displayedIndicators: { ...state.displayedIndicators, [symbol]: symbolConfigs } };
-      });
+      if (!response.ok) throw new Error("Échec de la réapplication du Feature Engineering.");
+      await get().fetchVbtInfo(symbol);
       
     } catch (error) {
       set({ error: error.message });
@@ -81,7 +82,6 @@ const useAppStore = create((set, get) => ({
     }
   },
 
-  // Active ou désactive l'affichage d'une courbe spécifique
   toggleIndicatorOutput: (symbol, indName, tf, outCol, defaultConfig) => {
     set((state) => {
       const symData = state.displayedIndicators[symbol] || {};
@@ -110,7 +110,6 @@ const useAppStore = create((set, get) => ({
     });
   },
 
-  // Modifie la couleur, l'épaisseur, etc., d'une courbe spécifique
   updateIndicatorOutputConfig: (symbol, indName, tf, outCol, key, value) => {
     set((state) => {
       const symData = state.displayedIndicators[symbol] || {};
@@ -188,6 +187,12 @@ const useAppStore = create((set, get) => ({
       if (!response.ok) return set({ vbtInfo: null });
       const data = await response.json();
       set({ vbtInfo: data });
+      
+      if (data.indicators) {
+        set((state) => ({
+          calculatedIndicators: { ...state.calculatedIndicators, [symbol]: data.indicators }
+        }));
+      }
     } catch (err) { set({ vbtInfo: null }); }
   },
 
@@ -255,12 +260,6 @@ const useAppStore = create((set, get) => ({
         await get().fetchLocalPairs();
         await get().fetchStats(symbol);
         await get().fetchVbtInfo(symbol);
-        
-        // Applique les indicateurs déjà calculés sur le nouveau timeframe
-        const calcInds = get().calculatedIndicators[symbol] || [];
-        if (calcInds.length > 0) {
-          await get().applyIndicators(symbol, calcInds);
-        }
       } else {
         const data = await response.json();
         throw new Error(data.detail);

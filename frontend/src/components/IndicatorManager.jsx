@@ -30,28 +30,21 @@ export default function IndicatorManager({ selectedSymbol }) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   
-  // Contournement du bug de référence React : On fige la liste en format texte 
   const rawCalculated = useAppStore(state => state.calculatedIndicators)[selectedSymbol];
-  const calcStr = JSON.stringify(rawCalculated || []);
-  
   const applyIndicators = useAppStore(state => state.applyIndicators);
   const isGlobalLoading = useAppStore(state => state.isLoading);
   
   const [localChecked, setLocalChecked] = useState([]);
 
-  // La dépendance n'est plus l'objet "rawCalculated" qui change à chaque rendu, mais sa chaîne stringifiée
+  // La synchronisation ne se fait STRICTEMENT qu'à l'ouverture de la modale pour éviter les boucles
   useEffect(() => {
     if (isOpen) {
-      setLocalChecked(JSON.parse(calcStr));
+      setLocalChecked(rawCalculated || []);
     }
-  }, [isOpen, calcStr]);
+  }, [isOpen]); // rawCalculated intentionnellement exclu des dépendances
 
   const toggleCheck = (ind) => {
-    if (localChecked.includes(ind)) {
-      setLocalChecked(localChecked.filter(i => i !== ind));
-    } else {
-      setLocalChecked([...localChecked, ind]);
-    }
+    setLocalChecked(prev => prev.includes(ind) ? prev.filter(i => i !== ind) : [...prev, ind]);
   };
 
   const handleCompute = async () => {
@@ -113,7 +106,7 @@ export default function IndicatorManager({ selectedSymbol }) {
 
             <div className="p-5 border-t border-[#30363d] flex justify-between items-center bg-[#0d1117] rounded-b-xl">
               <span className="text-xs text-gray-500 font-mono">
-                {localChecked.length} indicateur(s) sélectionné(s) - <span className="text-yellow-600">Attention: modifie les fichiers .h5</span>
+                {localChecked.length} indicateur(s) sélectionné(s)
               </span>
               <button 
                 onClick={handleCompute}

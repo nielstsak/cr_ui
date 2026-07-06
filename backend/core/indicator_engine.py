@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pandas as pd
 import logging
-from talib import abstract
+import vectorbtpro as vbt
 from backend.data.hdf5_storage import HDF5Storage
 
 logger = logging.getLogger("IndicatorEngine")
@@ -11,70 +11,77 @@ logger = logging.getLogger("IndicatorEngine")
 # Colonnes fondamentales intouchables
 BASE_COLS = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'quote_vol', 'trades']
 
-def process_and_save_indicators(storage_dir: str, exchange: str, symbol: str, indicators: list):
+def auto_compute_features(storage_dir: str, exchange: str, symbol: str, timeframe: str):
     """
-    Applique une liste d'indicateurs sur TOUS les timeframes d'un symbole.
-    Ajoute les indicateurs comme nouvelles colonnes et écrase les fichiers HDF5.
-    Si un indicateur n'est plus dans la liste, sa colonne est supprimée.
+    Calcule automatiquement l'intégralité du catalogue TA-Lib via VectorBT Pro (talib_all)
+    et met à jour de manière atomique le fichier de stockage HDF5 cible.
     """
-    symbol_dir = os.path.join(storage_dir, exchange, symbol)
-    if not os.path.exists(symbol_dir):
-        raise ValueError(f"Le dossier pour le symbole {symbol} n'existe pas.")
-        
-    tfs = [d for d in os.listdir(symbol_dir) if os.path.isdir(os.path.join(symbol_dir, d))]
+    symbol_dir = os.path.join(storage_dir, exchange.upper(), symbol.upper().replace("/", ""))
+    file_path = os.path.join(symbol_dir, timeframe.lower(), "ohlcv.h5")
     
-    for tf in tfs:
-        file_path = os.path.join(symbol_dir, tf, "ohlcv.h5")
-        if not os.path.exists(file_path):
-            continue
+    if not os.path.exists(file_path):
+        logger.warning(f"Impossible d'exécuter le Feature Engineering : fichier introuvable {file_path}")
+        return
+        
+    try:
+        # 1. Lecture du fichier HDF5 actuel
+        with HDF5Storage(file_path, exchange, symbol, timeframe, mode='r') as storage:
+            data_arr = storage.read_array(storage.dataset_path)
             
-        try:
-            # 1. Lecture du fichier HDF5 actuel
-            with HDF5Storage(file_path, exchange, symbol, tf, mode='r') as storage:
-                data = storage.read_array(storage.dataset_path)
+        if len(data_arr) == 0:
+            return
+            
+        df = pd.DataFrame(data_arr)
+        
+        # Purge complète : On réinitialise le DataFrame aux colonnes de base initiales
+        available_base_cols = [c for c in BASE_COLS if c in df.columns]
+        df_base = df[available_base_cols].copy()
+        
+        # Préparation de l'index temporel requis par l'API vectorbtpro Data
+        df_base['datetime'] = pd.to_datetime(df_base['open_time'], unit='ms')
+        df_base.set_index('datetime', inplace=True)
+        
+        # 2. Instanciation du conteneur de données natif VBT Pro
+        vbt_data = vbt.Data.from_data({symbol: df_base})
+        
+        # 3. Calcul automatisé global haute performance (avec skipna)
+        logger.info(f"Démarrage du Feature Engineering natif VectorBT Pro sur {symbol} ({timeframe})...")
+        features_df = vbt_data.run("talib_all", skipna=True, concat=True)
+        
+        # 4. Aplatissement dynamique du MultiIndex généré par VectorBT Pro
+        clean_columns = []
+        for col in features_df.columns:
+            elements = [str(e).upper() for e in col if str(e).upper() != symbol.upper()]
+            if elements[0].startswith("TALIB_"):
+                elements[0] = elements[0].replace("TALIB_", "")
+            
+            if len(elements) > 1 and elements[1] == 'REAL':
+                col_name = elements[0]
+            else:
+                col_name = "_".join(elements)
                 
-            df = pd.DataFrame(data)
+            clean_columns.append(col_name)
             
-            # 2. Purge : On ne garde que les colonnes de base. 
-            # Cela garantit que les indicateurs décochés disparaissent.
-            available_base_cols = [c for c in BASE_COLS if c in df.columns]
-            df = df[available_base_cols]
-            
-            # 3. Conversion des types pour TA-Lib (exige du float64)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = df[col].astype(np.float64)
-                    
-            # 4. Calcul dynamique et Ajout des nouvelles colonnes
-            for ind_name in indicators:
-                try:
-                    ind_func = abstract.Function(ind_name.upper())
-                    res = ind_func(df)
-                    
-                    # Gestion des noms de colonnes selon les sorties de l'indicateur (ex: MACD_MACDSIGNAL)
-                    out_names = ind_func.info['output_names']
-                    
-                    if isinstance(res, pd.Series) or (isinstance(res, np.ndarray) and res.ndim == 1):
-                        df[ind_name.upper()] = res
-                    elif isinstance(res, list) or isinstance(res, tuple):
-                        for i, out_arr in enumerate(res):
-                            df[f"{ind_name.upper()}_{out_names[i].upper()}"] = out_arr
-                    elif isinstance(res, pd.DataFrame):
-                        for i, col in enumerate(res.columns):
-                            df[f"{ind_name.upper()}_{out_names[i].upper()}"] = res[col]
-                            
-                except Exception as e:
-                    logger.error(f"Erreur lors du calcul de {ind_name} sur {tf}: {e}")
-                    
-            # 5. Conversion en Records (Tableau structuré NumPy)
-            records = df.to_records(index=False)
-            
-            # 6. Écriture : Suppression du fichier précédent pour redéfinir le schéma HDF5 dynamique
+        features_df.columns = clean_columns
+        
+        # Alignement des index physiques pour la concaténation
+        df_base.reset_index(drop=True, inplace=True)
+        features_df.reset_index(drop=True, inplace=True)
+        final_df = pd.concat([df_base, features_df], axis=1)
+        
+        # 5. Conversion vers Tableau NumPy Structuré (HDF5)
+        types = [(col, final_df[col].dtype) for col in final_df.columns]
+        structured_dtype = np.dtype(types)
+        records = final_df.to_records(index=False).astype(structured_dtype)
+        
+        # 6. Écriture atomique
+        if os.path.exists(file_path):
             os.remove(file_path)
-            with HDF5Storage(file_path, exchange, symbol, tf, mode='w') as storage:
-                storage.write_array(storage.dataset_path, records)
-                
-            logger.info(f"Indicateurs {indicators} appliqués avec succès au fichier HDF5 ({symbol} {tf}).")
             
-        except Exception as e:
-            logger.error(f"Erreur globale sur le traitement des indicateurs pour {tf} : {e}")
+        with HDF5Storage(file_path, exchange, symbol, timeframe, mode='w') as storage:
+            storage.write_array(storage.dataset_path, records)
+            
+        logger.info(f"Feature Engineering VBT Pro appliqué ({symbol} {timeframe}). {len(final_df.columns)} colonnes générées.")
+        
+    except Exception as e:
+        logger.error(f"Échec critique automatisation indicateurs sur {symbol} ({timeframe}) : {e}")

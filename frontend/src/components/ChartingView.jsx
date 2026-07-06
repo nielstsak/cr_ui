@@ -1,7 +1,7 @@
+// FICHIER : frontend/src/components/ChartingView.jsx
 import React, { useEffect, useState, useMemo } from 'react';
 import Plot from 'react-plotly.js';
 import useAppStore from '../store/useAppStore';
-import IndicatorManager from './IndicatorManager';
 
 // ==========================================
 // SOUS-COMPOSANT 1 : SÉLECTEUR DE SYMBOLE
@@ -81,7 +81,7 @@ const ResamplePanel = ({ availableTfs, selectedSymbol }) => {
 };
 
 // ==========================================
-// MODALE D'APPARENCE DES INDICATEURS
+// MODALE CATÉGORISÉE D'APPARENCE DES INDICATEURS
 // ==========================================
 const IndicatorVisualsModal = ({ isOpen, onClose, selectedSymbol, availableTfs }) => {
   const rawCalculated = useAppStore(state => state.calculatedIndicators)[selectedSymbol];
@@ -93,6 +93,15 @@ const IndicatorVisualsModal = ({ isOpen, onClose, selectedSymbol, availableTfs }
   const updateIndicatorOutputConfig = useAppStore(state => state.updateIndicatorOutputConfig);
   const fetchIndicatorMetadata = useAppStore(state => state.fetchIndicatorMetadata);
   const indicatorMetadata = useAppStore(state => state.indicatorMetadata);
+  
+  const indicatorGroups = useAppStore(state => state.indicatorGroups);
+  const fetchIndicatorGroups = useAppStore(state => state.fetchIndicatorGroups);
+
+  const [expandedGroups, setExpandedGroups] = useState({});
+
+  useEffect(() => {
+    fetchIndicatorGroups();
+  }, [fetchIndicatorGroups]);
 
   useEffect(() => {
     if (isOpen) {
@@ -103,6 +112,20 @@ const IndicatorVisualsModal = ({ isOpen, onClose, selectedSymbol, availableTfs }
   }, [isOpen, calculatedIndicators, indicatorMetadata, fetchIndicatorMetadata]);
 
   if (!isOpen) return null;
+
+  const indToGroupMap = {};
+  Object.entries(indicatorGroups).forEach(([groupName, indicators]) => {
+    indicators.forEach(ind => { indToGroupMap[ind] = groupName; });
+  });
+
+  const groupedCalculated = calculatedIndicators.reduce((acc, ind) => {
+    const group = indToGroupMap[ind] || "Autres (Custom)";
+    if (!acc[group]) acc[group] = [];
+    acc[group].push(ind);
+    return acc;
+  }, {});
+
+  const toggleGroup = (group) => setExpandedGroups(prev => ({ ...prev, [group]: !prev[group] }));
 
   const getExpectedColumns = (indName) => {
     const meta = indicatorMetadata[indName];
@@ -117,120 +140,108 @@ const IndicatorVisualsModal = ({ isOpen, onClose, selectedSymbol, availableTfs }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-sm">
-      <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[1000px] max-h-[85vh] flex flex-col">
-        <div className="flex justify-between items-center p-5 border-b border-[#30363d]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-sm p-4">
+      <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col">
+        <div className="flex justify-between items-center p-5 border-b border-[#30363d] bg-[#0d1117] rounded-t-xl">
           <h2 className="text-[#58a6ff] font-bold uppercase tracking-wider text-sm">
-            <i className="fa-solid fa-palette mr-2"></i> Affichage Multi-TF des Indicateurs
+            <i className="fa-solid fa-layer-group mr-2"></i> Catalogue Visuel des Indicateurs Calculés
           </h2>
           <button onClick={onClose} className="text-[#8b949e] hover:text-white"><i className="fa-solid fa-xmark text-lg"></i></button>
         </div>
         
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {calculatedIndicators.length === 0 ? (
-            <div className="text-center py-10 text-gray-500 text-xs italic">
-              Aucun indicateur n'a été calculé pour ce symbole.
-            </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {Object.keys(groupedCalculated).length === 0 ? (
+            <div className="text-center py-10 text-gray-500 text-xs italic">Aucun indicateur calculé détecté.</div>
           ) : (
-            calculatedIndicators.map(ind => {
-              const expectedColumns = getExpectedColumns(ind);
-              
-              return (
-                <div key={ind} className="bg-[#0d1117] border border-[#30363d] rounded-xl overflow-hidden shadow-inner">
-                  <div className="bg-[#1f6feb]/10 px-5 py-3 border-b border-[#30363d]">
-                    <h3 className="text-white font-bold font-mono text-lg">{ind}</h3>
-                  </div>
-                  
-                  <div className="p-4 space-y-6">
-                    {availableTfs.map(tf => {
+            Object.entries(groupedCalculated).sort().map(([groupName, inds]) => (
+              <div key={groupName} className="border border-[#30363d] rounded-lg overflow-hidden">
+                <button 
+                  onClick={() => toggleGroup(groupName)}
+                  className="w-full flex justify-between items-center p-3 bg-[#0d1117] hover:bg-[#1f6feb]/10 transition-colors"
+                >
+                  <span className="text-[#c9d1d9] font-bold text-xs uppercase tracking-wider">
+                    {groupName} <span className="text-[#8b949e] font-normal lowercase ml-2">({inds.length} indicateurs)</span>
+                  </span>
+                  <i className={`fa-solid fa-chevron-${expandedGroups[groupName] ? 'up' : 'down'} text-[#8b949e]`}></i>
+                </button>
+
+                {expandedGroups[groupName] && (
+                  <div className="p-4 bg-[#161b22] border-t border-[#30363d] grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {inds.map(ind => {
+                      const expectedColumns = getExpectedColumns(ind);
+                      const defaultPosition = groupName === 'Overlap Studies' ? 'overlay' : 'subchart';
+
                       return (
-                        <div key={`${ind}-${tf}`} className="border-l-2 border-[#58a6ff] pl-4 space-y-3">
-                          <h4 className="text-[#8b949e] font-bold text-xs uppercase tracking-wider">Timeframe : <span className="text-[#58a6ff]">{tf}</span></h4>
+                        <div key={ind} className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4 shadow-inner">
+                          <h3 className="text-white font-bold font-mono text-sm border-b border-[#30363d] pb-2 mb-3 text-[#58a6ff]">{ind}</h3>
                           
-                          <div className="space-y-3">
-                            {expectedColumns.map((colName, cIdx) => {
-                              const isDisplayed = !!displayedIndicators[ind]?.[tf]?.[colName];
-                              const config = displayedIndicators[ind]?.[tf]?.[colName] || {};
-                              
-                              const defaultConfig = {
-                                color: getAutoColor(cIdx),
-                                position: 'subchart',
-                                type: colName.includes('HIST') ? 'bar' : 'lines',
-                                width: 1.5,
-                                opacity: 1
-                              };
+                          <div className="space-y-4">
+                            {availableTfs.map(tf => (
+                              <div key={`${ind}-${tf}`} className="border-l-2 border-[#30363d] pl-3 space-y-2">
+                                <h4 className="text-[#8b949e] font-bold text-[10px] uppercase tracking-wider">TF : {tf}</h4>
+                                
+                                {expectedColumns.map((colName, cIdx) => {
+                                  const isDisplayed = !!displayedIndicators[ind]?.[tf]?.[colName];
+                                  const config = displayedIndicators[ind]?.[tf]?.[colName] || {};
+                                  
+                                  const defaultConfig = {
+                                    color: getAutoColor(cIdx), position: defaultPosition, type: colName.includes('HIST') ? 'bar' : 'lines', width: 1.5, opacity: 1
+                                  };
 
-                              return (
-                                <div key={colName} className={`p-3 rounded-lg border transition-colors ${isDisplayed ? 'bg-[#161b22] border-[#1f6feb]/50' : 'bg-[#0d1117] border-[#30363d]'}`}>
-                                  <div className="flex items-center space-x-3 mb-2">
-                                    <input 
-                                      type="checkbox" 
-                                      checked={isDisplayed}
-                                      onChange={() => toggleIndicatorOutput(selectedSymbol, ind, tf, colName, defaultConfig)}
-                                      className="rounded bg-[#161b22] border-[#30363d] text-[#1f6feb] cursor-pointer w-4 h-4"
-                                    />
-                                    <span className="text-sm font-mono text-white font-semibold">{colName}</span>
-                                  </div>
+                                  return (
+                                    <div key={colName} className={`p-2 rounded border ${isDisplayed ? 'bg-[#1f6feb]/5 border-[#1f6feb]/30' : 'bg-transparent border-transparent'}`}>
+                                      <div className="flex items-center space-x-2">
+                                        <input 
+                                          type="checkbox" checked={isDisplayed}
+                                          onChange={() => toggleIndicatorOutput(selectedSymbol, ind, tf, colName, defaultConfig)}
+                                          className="rounded bg-[#161b22] border-[#30363d] text-[#1f6feb] cursor-pointer"
+                                        />
+                                        <span className="text-[11px] font-mono text-[#c9d1d9]">{colName}</span>
+                                      </div>
 
-                                  {isDisplayed && (
-                                    <div className="grid grid-cols-5 gap-4 mt-3 pt-3 border-t border-[#30363d]">
-                                      <div>
-                                        <label className="block text-[10px] text-gray-500 uppercase mb-1">Couleur</label>
-                                        <input type="color" value={config.color} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'color', e.target.value)} className="w-full h-7 bg-transparent cursor-pointer rounded" />
-                                      </div>
-                                      <div>
-                                        <label className="block text-[10px] text-gray-500 uppercase mb-1">Position</label>
-                                        <select value={config.position} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'position', e.target.value)} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white">
-                                          <option value="overlay">Sur le prix</option>
-                                          <option value="subchart">Sous le prix</option>
-                                        </select>
-                                      </div>
-                                      <div>
-                                        <label className="block text-[10px] text-gray-500 uppercase mb-1">Type de tracé</label>
-                                        <select value={config.type} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'type', e.target.value)} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-white">
-                                          <option value="lines">Ligne continue</option>
-                                          <option value="bar">Histogramme (Barres)</option>
-                                          <option value="markers">Nuage de points</option>
-                                        </select>
-                                      </div>
-                                      <div>
-                                        <label className="block text-[10px] text-gray-500 uppercase mb-1">Épaisseur ({config.width})</label>
-                                        <input type="range" min="0.5" max="5" step="0.5" value={config.width} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'width', parseFloat(e.target.value))} className="w-full cursor-pointer accent-[#1f6feb] mt-2" />
-                                      </div>
-                                      <div>
-                                        <label className="block text-[10px] text-gray-500 uppercase mb-1">Opacité ({config.opacity})</label>
-                                        <input type="range" min="0.1" max="1" step="0.1" value={config.opacity} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'opacity', parseFloat(e.target.value))} className="w-full cursor-pointer accent-[#1f6feb] mt-2" />
-                                      </div>
+                                      {isDisplayed && (
+                                        <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-[#30363d]">
+                                          <div>
+                                            <select value={config.position} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'position', e.target.value)} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-1 py-1 text-[10px] text-white">
+                                              <option value="overlay">Sur le prix</option>
+                                              <option value="subchart">Sous le prix</option>
+                                            </select>
+                                          </div>
+                                          <div className="flex items-center space-x-2">
+                                            <input type="color" value={config.color} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'color', e.target.value)} className="w-4 h-4 bg-transparent cursor-pointer rounded" />
+                                            <select value={config.type} onChange={e => updateIndicatorOutputConfig(selectedSymbol, ind, tf, colName, 'type', e.target.value)} className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-1 py-1 text-[10px] text-white">
+                                              <option value="lines">Lignes</option>
+                                              <option value="bar">Barres</option>
+                                              <option value="markers">Points</option>
+                                            </select>
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
-                                  )}
-                                </div>
-                              );
-                            })}
+                                  );
+                                })}
+                              </div>
+                            ))}
                           </div>
                         </div>
                       );
                     })}
                   </div>
-                </div>
-              );
-            })
+                )}
+              </div>
+            ))
           )}
         </div>
         
-        {/* NOUVEAU BOUTON D'ACTUALISATION */}
         <div className="p-4 border-t border-[#30363d] flex justify-end bg-[#0d1117] rounded-b-xl">
-          <button 
-            onClick={onClose} 
-            className="px-6 py-2 bg-[#1f6feb] hover:bg-[#388bfd] text-white text-xs font-bold uppercase rounded-lg shadow-sm transition-colors"
-          >
-            Valider et Actualiser le Graphique
+          <button onClick={onClose} className="px-6 py-2 bg-[#1f6feb] hover:bg-[#388bfd] text-white text-xs font-bold uppercase rounded-lg shadow-sm transition-colors">
+            Fermer le gestionnaire
           </button>
         </div>
       </div>
     </div>
   );
 };
-
 
 // ==========================================
 // SOUS-COMPOSANT 3 : GRAPHIQUE OHLCV
@@ -281,15 +292,25 @@ const OhlcvChart = ({ availableTfs, descStats, selectedSymbol }) => {
           const start_time = new Date(startStr).getTime();
           const end_time = new Date(endStr).getTime() + 86400000;
 
+          const requiredCols = new Set();
+          Object.values(displayedIndicators).forEach(indData => {
+            if (indData[tf]) Object.keys(indData[tf]).forEach(col => requiredCols.add(col));
+          });
+
           const req = await fetch('http://localhost:8000/api/data/ohlcv', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ exchange: 'BINANCE', symbol: selectedSymbol, timeframe: tf, start_time, end_time })
+              body: JSON.stringify({ 
+                exchange: 'BINANCE', 
+                symbol: selectedSymbol, 
+                timeframe: tf, 
+                start_time, 
+                end_time,
+                columns: Array.from(requiredCols)
+              })
           });
           
-          if (req.ok) {
-            results[tf] = await req.json();
-          }
+          if (req.ok) results[tf] = await req.json();
         }));
 
         setMultiTfData(results);
@@ -303,11 +324,11 @@ const OhlcvChart = ({ availableTfs, descStats, selectedSymbol }) => {
     if (!isGlobalLoading && !isVisualsModalOpen) {
       fetchAllData();
     }
-  }, [selectedSymbol, activeTfsSignature, descStats, isGlobalLoading, isVisualsModalOpen]);
+  }, [selectedSymbol, activeTfsSignature, descStats, isGlobalLoading, isVisualsModalOpen, dispStr]);
 
-  const buildPlotlyConfig = () => {
+  const { traces, layout } = useMemo(() => {
     const mainData = multiTfData[selectedTf];
-    if (!mainData) return { traces: [], layout: {} };
+    if (!mainData || !mainData.open_time) return { traces: [], layout: {} };
 
     const traces = [];
     const mainTimeArray = mainData.open_time.map(t => new Date(t).toISOString());
@@ -346,7 +367,7 @@ const OhlcvChart = ({ availableTfs, descStats, selectedSymbol }) => {
     });
 
     const subchartsList = Array.from(subchartInds);
-    const baseHeight = 400;
+    const baseHeight = 500;
     const subchartHeight = 150;
     const totalHeight = baseHeight + (subchartsList.length * subchartHeight);
 
@@ -398,38 +419,24 @@ const OhlcvChart = ({ availableTfs, descStats, selectedSymbol }) => {
     };
 
     return { traces, layout };
-  };
-
-  const { traces, layout } = buildPlotlyConfig();
+  }, [multiTfData, selectedTf, dispStr, selectedSymbol]);
 
   return (
     <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm space-y-4 flex flex-col min-h-[600px]">
-      <IndicatorVisualsModal 
-        isOpen={isVisualsModalOpen} 
-        onClose={() => setIsVisualsModalOpen(false)} 
-        selectedSymbol={selectedSymbol} 
-        availableTfs={availableTfs}
-      />
+      <IndicatorVisualsModal isOpen={isVisualsModalOpen} onClose={() => setIsVisualsModalOpen(false)} selectedSymbol={selectedSymbol} availableTfs={availableTfs} />
 
       <div className="flex justify-between items-center border-b border-[#30363d] pb-3">
          <h4 className="text-white text-xs font-bold uppercase tracking-wider flex items-center text-[#58a6ff]">
-            <i className="fa-solid fa-chart-candlestick mr-2"></i> Graphique OHLCV Interactif
+            <i className="fa-solid fa-chart-candlestick mr-2"></i> Graphique Interactif (Optimisé)
          </h4>
          
          <div className="flex items-center space-x-3">
-            <button 
-              onClick={() => setIsVisualsModalOpen(true)}
-              className="px-4 py-1.5 bg-[#0d1117] border border-[#58a6ff] hover:bg-[#1f6feb]/20 text-[#58a6ff] hover:text-white text-[11px] font-bold uppercase rounded-lg transition-colors shadow-sm"
-            >
-              <i className="fa-solid fa-palette mr-2"></i> INDICATEURS
+            <button onClick={() => setIsVisualsModalOpen(true)} className="px-4 py-1.5 bg-[#0d1117] border border-[#58a6ff] hover:bg-[#1f6feb]/20 text-[#58a6ff] hover:text-white text-[11px] font-bold uppercase rounded-lg transition-colors shadow-sm">
+              <i className="fa-solid fa-layer-group mr-2"></i> Gérer l'Affichage
             </button>
             <div className="flex items-center space-x-3 bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-1.5">
-              <span className="text-[11px] text-[#8b949e] font-semibold uppercase tracking-wider">Affichage :</span>
-              <select
-                value={selectedTf}
-                onChange={(e) => setSelectedTf(e.target.value)}
-                className="bg-transparent text-xs text-white focus:outline-none font-mono cursor-pointer font-bold"
-              >
+              <span className="text-[11px] text-[#8b949e] font-semibold uppercase tracking-wider">Timeframe Maître :</span>
+              <select value={selectedTf} onChange={(e) => setSelectedTf(e.target.value)} className="bg-transparent text-xs text-white focus:outline-none font-mono cursor-pointer font-bold">
                 {availableTfs.map(tf => <option key={tf} value={tf}>{tf}</option>)}
               </select>
             </div>
@@ -440,35 +447,29 @@ const OhlcvChart = ({ availableTfs, descStats, selectedSymbol }) => {
         {isLoading || isGlobalLoading ? (
            <div className="text-[#8b949e] flex flex-col items-center py-20">
              <i className="fa-solid fa-circle-notch fa-spin fa-2x mb-3 text-[#1f6feb]"></i> 
-             <span className="text-xs font-mono">Chargement du Graphique Multi-TF...</span>
+             <span className="text-xs font-mono">Chargement des vecteurs du Graphique...</span>
            </div>
         ) : error ? (
            <div className="text-[#f85149] text-xs font-mono bg-[#f85149]/10 p-4 rounded border border-[#f85149]/20">
              <i className="fa-solid fa-triangle-exclamation mr-2"></i> {error}
            </div>
         ) : traces.length > 0 ? (
-           <Plot
-              data={traces}
-              layout={layout}
-              useResizeHandler={true}
-              style={{ width: '100%', height: '100%' }}
-              config={{ responsive: true, displayModeBar: true, scrollZoom: true }}
-           />
+           <Plot data={traces} layout={layout} useResizeHandler={true} style={{ width: '100%', height: '100%' }} config={{ responsive: true, displayModeBar: true, scrollZoom: true }} />
         ) : (
-           <div className="text-[#8b949e] text-xs italic py-20">
-             Aucune donnée à afficher.
-           </div>
+           <div className="text-[#8b949e] text-xs italic py-20">Aucune série temporelle disponible.</div>
         )}
       </div>
     </div>
   );
 };
 
-export default function ChartingView() {
+// ==========================================
+// COMPOSANT PRINCIPAL
+// ==========================================
+const ChartingView = () => {
    const localPairs = useAppStore(state => state.localPairs);
    const descStats = useAppStore(state => state.descStats);
    const fetchStats = useAppStore(state => state.fetchStats);
-   
    const [selectedSymbol, setSelectedSymbol] = useState('');
 
    const currentPair = localPairs.find(p => p.symbol === selectedSymbol);
@@ -488,28 +489,15 @@ export default function ChartingView() {
 
    return (
      <div className="p-6 space-y-6">
-        <SymbolSelector 
-           localPairs={localPairs} 
-           selectedSymbol={selectedSymbol} 
-           onSelect={setSelectedSymbol} 
-        />
-        
+        <SymbolSelector localPairs={localPairs} selectedSymbol={selectedSymbol} onSelect={setSelectedSymbol} />
         {selectedSymbol && currentPair && (
            <>
-             <ResamplePanel 
-                availableTfs={availableTfs} 
-                selectedSymbol={selectedSymbol} 
-             />
-             
-             <IndicatorManager selectedSymbol={selectedSymbol} />
-             
-             <OhlcvChart 
-                availableTfs={availableTfs} 
-                descStats={descStats} 
-                selectedSymbol={selectedSymbol} 
-             />
+             <ResamplePanel availableTfs={availableTfs} selectedSymbol={selectedSymbol} />
+             <OhlcvChart availableTfs={availableTfs} descStats={descStats} selectedSymbol={selectedSymbol} />
            </>
         )}
      </div>
    );
-}
+};
+
+export default ChartingView;

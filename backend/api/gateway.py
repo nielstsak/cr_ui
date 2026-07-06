@@ -21,10 +21,10 @@ import uvicorn
 import zmq
 import vectorbtpro as vbt
 
-from talib import abstract 
+from talib import abstract, get_function_groups 
 
 from backend.core.resampler import timeframe_to_ms, resample_ohlcv
-from backend.core.indicator_engine import process_and_save_indicators
+from backend.core.indicator_engine import auto_compute_features, BASE_COLS
 from backend.data.binance_client import BinanceClient
 from backend.data.hdf5_storage import HDF5Storage, OHLCV_DTYPE
 from backend.api.runs import router as runs_router, init_database_and_runs, sync_database_with_disk
@@ -227,10 +227,6 @@ async def shutdown_event():
     global zmq_server
     if zmq_server: zmq_server.stop()
 
-# ==========================================
-# SCHEMAS & ROUTES
-# ==========================================
-
 class VbtFetchRequest(pydantic.BaseModel):
     symbol: str
     client: Optional[str] = None
@@ -251,10 +247,10 @@ class OhlcvDataRequest(pydantic.BaseModel):
     timeframe: str
     start_time: int
     end_time: int
+    columns: Optional[List[str]] = None
 
 class IndicatorApplyRequest(pydantic.BaseModel):
     symbol: str
-    indicators: List[str]
 
 async def _vbt_fetch_coro(task_id: str, req: VbtFetchRequest):
     symbol = req.symbol.upper().replace("/", "")
@@ -278,7 +274,7 @@ async def _vbt_fetch_coro(task_id: str, req: VbtFetchRequest):
 
         tasks_db[task_id]["progress"] = 30.0
         vbt_data = await loop.run_in_executor(None, do_fetch)
-        tasks_db[task_id]["progress"] = 80.0
+        tasks_db[task_id]["progress"] = 60.0
         
         if symbol in vbt_data.data: df = vbt_data.data[symbol]
         else: df = list(vbt_data.data.values())[0]
@@ -303,7 +299,8 @@ async def _vbt_fetch_coro(task_id: str, req: VbtFetchRequest):
         chunk['quote_vol'] = get_col(['quote volume', 'quote_volume'])
         chunk['trades'] = get_col(['trade count', 'number of trades', 'trades'])
         
-        tf_dir = os.path.join(app_state.state["configurations"]["storage_dir"], "BINANCE", symbol, tf)
+        storage_dir = app_state.state["configurations"]["storage_dir"]
+        tf_dir = os.path.join(storage_dir, "BINANCE", symbol, tf)
         os.makedirs(tf_dir, exist_ok=True)
         tf_file_path = os.path.join(tf_dir, "ohlcv.h5")
         
@@ -322,6 +319,14 @@ async def _vbt_fetch_coro(task_id: str, req: VbtFetchRequest):
         """, (symbol, tf, len(chunk), start_str, end_str))
         conn.commit()
         conn.close()
+
+        tasks_db[task_id]["progress"] = 80.0
+        
+        # Exécution Fire-and-Forget pour ne pas bloquer le système si le calcul est lourd
+        def safe_compute():
+            try: auto_compute_features(storage_dir, "BINANCE", symbol, tf)
+            except Exception as e: logger.error(f"Erreur background auto_compute: {e}")
+        loop.run_in_executor(None, safe_compute)
 
         tasks_db[task_id]["progress"] = 100.0
         return {"symbol": symbol, "timeframe": tf, "candles": len(chunk)}
@@ -353,6 +358,12 @@ async def get_vbt_info(symbol: str):
             arr = storage.read_array(storage.dataset_path)
         
         df = pd.DataFrame(arr)
+        indicators_found = set()
+        for col in df.columns:
+            if col not in BASE_COLS:
+                base_name = col.split('_')[0]
+                indicators_found.add(base_name)
+                
         df.index = pd.to_datetime(df['open_time'], unit='ms')
         df = df.drop(columns=['open_time'])
         vbt_data = vbt.Data.from_data({symbol: df})
@@ -367,7 +378,12 @@ async def get_vbt_info(symbol: str):
         
         stats_series = vbt_data.stats()
         stats_dict = {str(k): str(v) for k, v in stats_series.items()}
-        return {"info": info_str, "stats": stats_dict}
+        
+        return {
+            "info": info_str, 
+            "stats": stats_dict, 
+            "indicators": list(indicators_found)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -446,17 +462,24 @@ async def purge_symbol_data(symbol: str):
 async def add_timeframe_via_resampling(req: AddTimeframeRequest):
     symbol = req.symbol.upper().replace("/", "")
     target_tf = req.target_timeframe.lower().strip()
-    base_dir = os.path.join(app_state.state["configurations"]["storage_dir"], "BINANCE", symbol)
+    storage_dir = app_state.state["configurations"]["storage_dir"]
+    base_dir = os.path.join(storage_dir, "BINANCE", symbol)
     tfs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     base_tf = "5m" if "5m" in tfs else tfs[0]
     base_file = os.path.join(base_dir, base_tf, "ohlcv.h5")
     
     try:
+        # === FIX CRITIQUE: Extraire unitairement les 8 colonnes OHLCV ===
+        # L'ancienne version crashait car HDF5 renvoyait > 150 colonnes à Numba.
         with HDF5Storage(base_file, "BINANCE", symbol, base_tf, mode='r') as storage_base:
-            base_data = storage_base.read_array(storage_base.dataset_path)
+            full_data = storage_base.read_array(storage_base.dataset_path)
+            
+        base_cols = [n for n in OHLCV_DTYPE.names]
+        ohlcv_data = full_data[base_cols].copy().astype(OHLCV_DTYPE)
         
-        resampled_data = resample_ohlcv(base_data, target_tf, align='close')
-        target_dir = os.path.join(app_state.state["configurations"]["storage_dir"], "BINANCE", symbol, target_tf)
+        resampled_data = resample_ohlcv(ohlcv_data, target_tf, align='close')
+        
+        target_dir = os.path.join(storage_dir, "BINANCE", symbol, target_tf)
         os.makedirs(target_dir, exist_ok=True)
         target_file_path = os.path.join(target_dir, "ohlcv.h5")
         
@@ -466,22 +489,35 @@ async def add_timeframe_via_resampling(req: AddTimeframeRequest):
         conn = sqlite3.connect("data/runs.db")
         cursor = conn.cursor()
         cursor.execute("DELETE FROM runs WHERE symbol = ? AND timeframe = ?", (symbol, target_tf))
-        start_str = pd.to_datetime(base_data[0]['open_time'], unit='ms').strftime('%Y-%m-%d')
-        end_str = pd.to_datetime(base_data[-1]['open_time'], unit='ms').strftime('%Y-%m-%d')
+        start_str = pd.to_datetime(full_data[0]['open_time'], unit='ms').strftime('%Y-%m-%d')
+        end_str = pd.to_datetime(full_data[-1]['open_time'], unit='ms').strftime('%Y-%m-%d')
         cursor.execute("""
             INSERT INTO runs (symbol, timeframe, sample_size, period_start, period_end, kick_threshold, timestamp)
             VALUES (?, ?, ?, ?, ?, 2.0, datetime('now'))
-        """, (symbol, target_tf, len(base_data), start_str, end_str))
+        """, (symbol, target_tf, len(full_data), start_str, end_str))
         conn.commit()
         conn.close()
+        
+        # Fire-And-Forget (évite le timeout HTTP 500)
+        loop = asyncio.get_running_loop()
+        def safe_compute():
+            try: auto_compute_features(storage_dir, "BINANCE", symbol, target_tf)
+            except Exception as e: logger.error(f"Erreur background auto_compute sur le resample: {e}")
+        loop.run_in_executor(None, safe_compute)
+        
         return {"status": "success", "timeframe_added": target_tf}
     except Exception as e:
+        logger.error(f"Add Timeframe Erreur 500 : {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/tasks/{task_id}")
 async def get_task_status(task_id: str):
     if task_id not in tasks_db: raise HTTPException(status_code=404, detail="Task introuvable.")
     return tasks_db[task_id]
+
+@app.get("/api/indicators/groups")
+async def get_indicator_groups():
+    return get_function_groups()
 
 @app.post("/api/data/ohlcv")
 async def get_ohlcv_data(req: OhlcvDataRequest):
@@ -490,6 +526,20 @@ async def get_ohlcv_data(req: OhlcvDataRequest):
         raise HTTPException(status_code=400, detail="No historical prices available.")
     
     df = pd.DataFrame(arr)
+    
+    # === SÉLECTION STRICTE (Protège la bande passante HTTP) ===
+    cols_to_keep = ['open_time', 'open', 'high', 'low', 'close', 'volume']
+    if req.columns:
+        cols_to_keep.extend([c for c in req.columns if c in df.columns])
+    
+    cols_to_keep = list(dict.fromkeys(cols_to_keep))
+    df = df[cols_to_keep]
+
+    # === DÉCIMATION CONTINUE (Empêche Plotly de geler / les gaps visuels massifs) ===
+    MAX_POINTS = 2000
+    if len(df) > MAX_POINTS:
+        df = df.tail(MAX_POINTS).copy()
+        
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.astype(object).where(pd.notnull(df), None)
     
@@ -500,26 +550,22 @@ async def apply_indicators_to_hdf5(req: IndicatorApplyRequest):
     try:
         loop = asyncio.get_running_loop()
         storage_dir = app_state.state["configurations"]["storage_dir"]
-        await loop.run_in_executor(
-            None,
-            process_and_save_indicators,
-            storage_dir,
-            "BINANCE",
-            req.symbol.upper(),
-            req.indicators
-        )
-        return {"status": "success", "message": f"{len(req.indicators)} indicateurs appliqués."}
+        
+        def run_mass_compute():
+            symbol_dir = os.path.join(storage_dir, "BINANCE", req.symbol.upper())
+            if os.path.exists(symbol_dir):
+                tfs = [d for d in os.listdir(symbol_dir) if os.path.isdir(os.path.join(symbol_dir, d))]
+                for tf in tfs:
+                    auto_compute_features(storage_dir, "BINANCE", req.symbol.upper(), tf)
+                    
+        await loop.run_in_executor(None, run_mass_compute)
+        return {"status": "success", "message": "Feature Engineering VectorBT Pro réappliqué."}
     except Exception as e:
         logger.error(f"Erreur application indicateurs : {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# LA ROUTE MANQUANTE RÉINTÉGRÉE POUR ÉVITER L'ERREUR 404
 @app.get("/api/indicator/metadata/{func_name}")
 async def get_indicator_metadata(func_name: str):
-    """
-    Introspecte TA-Lib pour renvoyer le nom officiel des colonnes générées par un indicateur.
-    Permet au frontend de savoir comment mapper les sous-graphes (ex: MACD_MACDSIGNAL).
-    """
     try:
         ind_func = abstract.Function(func_name.upper())
         return {
