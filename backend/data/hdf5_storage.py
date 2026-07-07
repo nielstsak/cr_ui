@@ -1,4 +1,3 @@
-# FICHIER : backend/data/hdf5_storage.py
 import os
 import h5py
 import numba
@@ -6,15 +5,6 @@ import numpy as np
 from pathlib import Path
 from typing import Union, Optional, Any, cast, Dict, List
 
-# Strict OHLCV Schema
-# - open_time: int64 (timestamp in ms, strictly monotonic increasing)
-# - open: float64
-# - high: float64
-# - low: float64
-# - close: float64
-# - volume: float64
-# - quote_vol: float64
-# - trades: int32
 OHLCV_DTYPE = np.dtype([
     ('open_time', np.int64),
     ('open', np.float64),
@@ -26,7 +16,6 @@ OHLCV_DTYPE = np.dtype([
     ('trades', np.int32)
 ])
 
-# Validation error messages mapping
 ERROR_MESSAGES = {
     1: "First timestamp in chunk is not strictly greater than the last timestamp in storage.",
     2: "Timestamps are not strictly monotonically increasing within the chunk.",
@@ -40,33 +29,17 @@ ERROR_MESSAGES = {
 
 @numba.njit(nogil=True, parallel=False)
 def validate_ohlcv_chunk(
-    open_time: np.ndarray,
-    open_p: np.ndarray,
-    high_p: np.ndarray,
-    low_p: np.ndarray,
-    close_p: np.ndarray,
-    volume: np.ndarray,
-    quote_vol: np.ndarray,
-    trades: np.ndarray,
-    start_idx: int,
-    last_open_time: int,
-    err_indices: np.ndarray,
-    err_types: np.ndarray,
-    err_values: np.ndarray,
-    err_count: int
+    open_time: np.ndarray, open_p: np.ndarray, high_p: np.ndarray, low_p: np.ndarray,
+    close_p: np.ndarray, volume: np.ndarray, quote_vol: np.ndarray, trades: np.ndarray,
+    start_idx: int, last_open_time: int, err_indices: np.ndarray, err_types: np.ndarray,
+    err_values: np.ndarray, err_count: int
 ) -> int:
-    """
-    Validation JIT haute performance d'un chunk OHLCV.
-    Contrôle la monotonie, la validité géométrique des prix et l'absence de NaN/Inf.
-    """
     n = len(open_time)
     max_err = len(err_indices)
     
     for i in range(n):
-        if err_count >= max_err:
-            break
+        if err_count >= max_err: break
             
-        # 0: Non-monotonic timestamp
         if i == 0:
             if last_open_time > 0 and open_time[i] <= last_open_time:
                 err_indices[err_count] = start_idx + i
@@ -82,244 +55,109 @@ def validate_ohlcv_chunk(
         
         if err_count >= max_err: break
                 
-        # 1: Invalid open price
         if np.isnan(open_p[i]) or np.isinf(open_p[i]) or open_p[i] <= 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 1
-            err_values[err_count] = float(open_p[i])
-            err_count += 1
-            
-        # 2: Invalid high price
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 1; err_values[err_count] = float(open_p[i]); err_count += 1
         if np.isnan(high_p[i]) or np.isinf(high_p[i]) or high_p[i] <= 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 2
-            err_values[err_count] = float(high_p[i])
-            err_count += 1
-            
-        # 3: Invalid low price
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 2; err_values[err_count] = float(high_p[i]); err_count += 1
         if np.isnan(low_p[i]) or np.isinf(low_p[i]) or low_p[i] <= 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 3
-            err_values[err_count] = float(low_p[i])
-            err_count += 1
-
-        # 4: Invalid close price
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 3; err_values[err_count] = float(low_p[i]); err_count += 1
         if np.isnan(close_p[i]) or np.isinf(close_p[i]) or close_p[i] <= 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 4
-            err_values[err_count] = float(close_p[i])
-            err_count += 1
-            
-        # 5: Geometric inconsistency
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 4; err_values[err_count] = float(close_p[i]); err_count += 1
         if high_p[i] < open_p[i] or high_p[i] < close_p[i] or high_p[i] < low_p[i] or low_p[i] > open_p[i] or low_p[i] > close_p[i]:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 5
-            err_values[err_count] = float(high_p[i])
-            err_count += 1
-            
-        # 6: Invalid volume
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 5; err_values[err_count] = float(high_p[i]); err_count += 1
         if np.isnan(volume[i]) or np.isinf(volume[i]) or volume[i] < 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 6
-            err_values[err_count] = float(volume[i])
-            err_count += 1
-            
-        # 7: Invalid quote_vol
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 6; err_values[err_count] = float(volume[i]); err_count += 1
         if np.isnan(quote_vol[i]) or np.isinf(quote_vol[i]) or quote_vol[i] < 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 7
-            err_values[err_count] = float(quote_vol[i])
-            err_count += 1
-            
-        # 8: Invalid trades
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 7; err_values[err_count] = float(quote_vol[i]); err_count += 1
         if trades[i] < 0:
-            err_indices[err_count] = start_idx + i
-            err_types[err_count] = 8
-            err_values[err_count] = float(trades[i])
-            err_count += 1
+            err_indices[err_count] = start_idx + i; err_types[err_count] = 8; err_values[err_count] = float(trades[i]); err_count += 1
             
     return err_count
 
-
 def scan_full_dataset(filepath: str, dataset_path: str, max_errors: int = 100) -> Dict[str, Any]:
-    """
-    Parcourt un jeu de données HDF5 par chunks et applique la validation stricte JIT.
-    """
-    if not os.path.exists(filepath):
-        return {"status": "FILE_NOT_FOUND", "errors": []}
-        
+    if not os.path.exists(filepath): return {"status": "FILE_NOT_FOUND", "errors": []}
     with h5py.File(filepath, 'r') as f:
-        if dataset_path not in f:
-            return {"status": "DATASET_NOT_FOUND", "errors": []}
-            
+        if dataset_path not in f: return {"status": "DATASET_NOT_FOUND", "errors": []}
         dataset = f[dataset_path]
         total_rows = len(dataset)
-        
         chunk_size = 100_000
         err_indices = np.zeros(max_errors, dtype=np.int64)
         err_types = np.zeros(max_errors, dtype=np.int32)
         err_values = np.zeros(max_errors, dtype=np.float64)
         err_count = 0
-        
         last_open_time = -1
         
         for start_idx in range(0, total_rows, chunk_size):
             end_idx = min(start_idx + chunk_size, total_rows)
             data = dataset[start_idx:end_idx]
-            
             err_count = validate_ohlcv_chunk(
-                data['open_time'],
-                data['open'],
-                data['high'],
-                data['low'],
-                data['close'],
-                data['volume'],
-                data['quote_vol'],
-                data['trades'],
-                start_idx,
-                last_open_time,
-                err_indices,
-                err_types,
-                err_values,
-                err_count
+                data['open_time'], data['open'], data['high'], data['low'], data['close'],
+                data['volume'], data['quote_vol'], data['trades'], start_idx, last_open_time,
+                err_indices, err_types, err_values, err_count
             )
-            
-            if len(data) > 0:
-                last_open_time = data['open_time'][-1]
+            if len(data) > 0: last_open_time = data['open_time'][-1]
+            if err_count >= max_errors: break
                 
-            if err_count >= max_errors:
-                break
-                
-        # Map JIT error codes to messages
         error_labels = {
-            0: "Non-monotonic timestamp",
-            1: "Invalid open price (<=0, NaN, or Inf)",
-            2: "Invalid high price (<=0, NaN, or Inf)",
-            3: "Invalid low price (<=0, NaN, or Inf)",
-            4: "Invalid close price (<=0, NaN, or Inf)",
-            5: "Geometric inconsistency (high < open/close/low, or low > open/close)",
-            6: "Invalid volume (<0, NaN, or Inf)",
-            7: "Invalid quote_vol (<0, NaN, or Inf)",
-            8: "Invalid trades (<0)"
+            0: "Non-monotonic timestamp", 1: "Invalid open price (<=0, NaN, or Inf)", 2: "Invalid high price (<=0, NaN, or Inf)",
+            3: "Invalid low price (<=0, NaN, or Inf)", 4: "Invalid close price (<=0, NaN, or Inf)",
+            5: "Geometric inconsistency", 6: "Invalid volume", 7: "Invalid quote_vol", 8: "Invalid trades"
         }
         
         has_errors = err_count > 0
-        reported_errors = []
-        for i in range(min(err_count, max_errors)):
-            reported_errors.append({
-                "row_index": int(err_indices[i]),
-                "error_type": error_labels.get(int(err_types[i]), "Unknown"),
-                "value": float(err_values[i])
-            })
+        reported_errors = [{"row_index": int(err_indices[i]), "error_type": error_labels.get(int(err_types[i]), "Unknown"), "value": float(err_values[i])} for i in range(min(err_count, max_errors))]
             
-        return {
-            "status": "CORRUPTED" if has_errors else "OK",
-            "total_rows_scanned": total_rows,
-            "total_errors": err_count,
-            "errors": reported_errors
-        }
-
+        return {"status": "CORRUPTED" if has_errors else "OK", "total_rows_scanned": total_rows, "total_errors": err_count, "errors": reported_errors}
 
 class HDF5Storage:
-    """
-    Gestionnaire de contexte HDF5 optimisé pour calcul vectoriel.
-    Garantit l'atomicité des accès, le mode SWMR et la stricte conformité
-    des types pour les pipelines Numba et VectorBT Pro.
-    """
-
-    def __init__(self, file_path: Union[str, Path], exchange: str = "BINANCE", symbol: str = "BTCUSDT", timeframe: str = "1m", mode: str = 'a', libver: str = 'latest'):
-        """
-        Initialise le gestionnaire HDF5 avec rétrocompatibilité pour les tests d'intégration.
-        """
+    def __init__(self, file_path: Union[str, Path], exchange: str = "BINANCE", symbol: str = "BTCUSDT", timeframe: str = "1m", mode: str = 'a', libver: str = 'latest', group_path: str = "/OHLCV"):
         self.filepath = Path(file_path)
         self.file_path = str(self.filepath)
         self.exchange = exchange
         self.symbol = symbol
         self.timeframe = timeframe
-        self.dataset_path = f"{self.exchange.upper()}/{self.symbol.upper()}/{self.timeframe.lower()}/ohlcv"
+        self.group_path = group_path
+        self.dataset_path = self.group_path.lstrip('/')
         self.mode = mode
         self.libver = libver
         self.file: Optional[h5py.File] = None
         
     def __enter__(self) -> 'HDF5Storage':
-        """Ouvre le fichier HDF5 et crée l'arborescence si nécessaire."""
         if self.mode in ['w', 'a', 'w-', 'x']:
             self.filepath.parent.mkdir(parents=True, exist_ok=True)
-            
         self.file = h5py.File(self.filepath, mode=self.mode, libver=self.libver)
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Ferme le fichier HDF5 proprement."""
         if self.file is not None:
             self.file.close()
 
     def enable_swmr(self) -> None:
-        """Active le mode Single-Writer/Multiple-Reader sur le fichier ouvert."""
-        if self.file is None:
-            raise RuntimeError("Impossible d'activer SWMR: Fichier non ouvert.")
-        if self.mode != 'r':
-            self.file.swmr_mode = True
+        if self.file is None: raise RuntimeError("Impossible d'activer SWMR: Fichier non ouvert.")
+        if self.mode != 'r': self.file.swmr_mode = True
 
     def write_array(self, path: str, data: np.ndarray, **kwargs: Any) -> None:
-        """
-        Écrit un vecteur ou une matrice NumPy dans le fichier HDF5.
-        
-        Args:
-            path: Chemin interne du dataset (ex: 'market_data/ohlcv').
-            data: Matrice numpy.ndarray typée (float32/float64/int/struct).
-            **kwargs: Arguments supplémentaires (ex: chunks=True, maxshape=(None,)).
-            
-        Raises:
-            TypeError: Si les données ne sont pas des objets numpy.ndarray.
-            RuntimeError: Si le fichier n'est pas ouvert.
-        """
-        if self.file is None:
-            raise RuntimeError("Fichier non ouvert.")
-        if not isinstance(data, np.ndarray):
-            raise TypeError(f"Le format de données doit être un numpy.ndarray, reçu: {type(data)}")
-            
-        if path in self.file:
-            del self.file[path]
-            
+        if self.file is None: raise RuntimeError("Fichier non ouvert.")
+        if not isinstance(data, np.ndarray): raise TypeError(f"Le format de données doit être un numpy.ndarray, reçu: {type(data)}")
+        if path in self.file: del self.file[path]
         self.file.create_dataset(path, data=data, **kwargs)
 
     def read_array(self, path: str) -> np.ndarray:
-        """
-        Lit et retourne un vecteur NumPy depuis le fichier HDF5.
-        
-        Args:
-            path: Chemin interne du dataset.
-            
-        Returns:
-            Une copie en mémoire du dataset sous forme de numpy.ndarray.
-            
-        Raises:
-            RuntimeError: Si le fichier n'est pas ouvert.
-            KeyError: Si le chemin spécifié n'existe pas.
-        """
-        if self.file is None:
-            raise RuntimeError("Fichier non ouvert.")
-        if path not in self.file:
-            raise KeyError(f"Dataset non trouvé au chemin HDF5 interne: {path}")
-            
-        # Extraction stricte vers la mémoire via l'opérateur [:]
+        if self.file is None: raise RuntimeError("Fichier non ouvert.")
+        if path not in self.file: raise KeyError(f"Dataset non trouvé au chemin HDF5 interne: {path}")
         return cast(np.ndarray, self.file[path][:])
 
     def append_chunk(self, chunk: np.ndarray) -> None:
-        """
-        Ajoute un chunk NumPy structuré (OHLCV_DTYPE) au dataset HDF5.
-        """
-        if not isinstance(chunk, np.ndarray):
-            raise TypeError(f"Le format de données doit être un numpy.ndarray, reçu: {type(chunk)}")
-        if chunk.dtype != OHLCV_DTYPE:
+        if not isinstance(chunk, np.ndarray): raise TypeError(f"Le format de données doit être un numpy.ndarray, reçu: {type(chunk)}")
+        
+        is_ohlcv = self.dataset_path.upper() == "OHLCV"
+        if is_ohlcv and chunk.dtype != OHLCV_DTYPE:
             raise ValueError(f"Le chunk doit correspondre au dtype OHLCV: {OHLCV_DTYPE}")
-        if len(chunk) == 0:
-            return
+            
+        if len(chunk) == 0: return
 
         is_owner = False
         if self.file is None:
-            # Assurer que les dossiers parents existent
             self.filepath.parent.mkdir(parents=True, exist_ok=True)
             self.file = h5py.File(self.filepath, mode='a', libver=self.libver)
             is_owner = True
@@ -327,50 +165,23 @@ class HDF5Storage:
         try:
             path = self.dataset_path
             if path not in self.file:
-                # Créer le dataset avec support de redimensionnement infini
-                self.file.create_dataset(
-                    path,
-                    data=chunk,
-                    maxshape=(None,),
-                    chunks=True
-                )
+                self.file.create_dataset(path, data=chunk, maxshape=(None,), chunks=True)
             else:
                 dataset = self.file[path]
-                last_open_time = -1
-                if len(dataset) > 0:
-                    last_open_time = dataset[-1]['open_time']
+                
+                if is_ohlcv:
+                    last_open_time = -1
+                    if len(dataset) > 0: last_open_time = dataset[-1]['open_time']
+                    err_indices = np.zeros(10, dtype=np.int64)
+                    err_types = np.zeros(10, dtype=np.int32)
+                    err_values = np.zeros(10, dtype=np.float64)
+                    err_count = validate_ohlcv_chunk(
+                        chunk['open_time'], chunk['open'], chunk['high'], chunk['low'],
+                        chunk['close'], chunk['volume'], chunk['quote_vol'], chunk['trades'],
+                        0, last_open_time, err_indices, err_types, err_values, 0
+                    )
+                    if err_count > 0: raise ValueError(f"OHLCV validation failed: {ERROR_MESSAGES.get(err_types[0] + (1 if err_indices[0]==0 and err_types[0]==0 else 2), 'Unknown')}")
 
-                # Validation JIT du chunk
-                err_indices = np.zeros(10, dtype=np.int64)
-                err_types = np.zeros(10, dtype=np.int32)
-                err_values = np.zeros(10, dtype=np.float64)
-                err_count = validate_ohlcv_chunk(
-                    chunk['open_time'],
-                    chunk['open'],
-                    chunk['high'],
-                    chunk['low'],
-                    chunk['close'],
-                    chunk['volume'],
-                    chunk['quote_vol'],
-                    chunk['trades'],
-                    0,
-                    last_open_time,
-                    err_indices,
-                    err_types,
-                    err_values,
-                    0
-                )
-                if err_count > 0:
-                    err_type = err_types[0]
-                    err_idx = err_indices[0]
-                    if err_type == 0:
-                        err_code = 1 if err_idx == 0 else 2
-                    else:
-                        err_code = err_type + 2
-                    msg = ERROR_MESSAGES.get(err_code, "Validation error occurred.")
-                    raise ValueError(f"OHLCV validation failed: {msg}")
-
-                # Redimensionner et ajouter
                 old_size = dataset.shape[0]
                 new_size = old_size + chunk.shape[0]
                 dataset.resize((new_size,))
@@ -381,30 +192,42 @@ class HDF5Storage:
                 self.file = None
 
     def read_chunk(self, start_time: int, end_time: int) -> np.ndarray:
-        """
-        Lit les bougies OHLCV comprises dans l'intervalle [start_time, end_time[.
-        """
         is_owner = False
         if self.file is None:
-            if not self.filepath.exists():
-                return np.empty(0, dtype=OHLCV_DTYPE)
+            if not self.filepath.exists(): return np.empty(0, dtype=OHLCV_DTYPE if self.dataset_path.upper() == "OHLCV" else object)
             self.file = h5py.File(self.filepath, mode='r', libver=self.libver)
             is_owner = True
 
         try:
             path = self.dataset_path
-            if path not in self.file:
-                return np.empty(0, dtype=OHLCV_DTYPE)
-
+            if path not in self.file: return np.empty(0, dtype=OHLCV_DTYPE if path.upper() == "OHLCV" else object)
             dataset = self.file[path]
-            if len(dataset) == 0:
-                return np.empty(0, dtype=OHLCV_DTYPE)
+            if len(dataset) == 0: return np.empty(0, dtype=OHLCV_DTYPE if path.upper() == "OHLCV" else object)
 
             open_times_arr = dataset['open_time'][:]
             start_idx = np.searchsorted(open_times_arr, start_time, side='left')
             end_idx = np.searchsorted(open_times_arr, end_time, side='left')
-
             return dataset[start_idx:end_idx]
+        finally:
+            if is_owner:
+                self.file.close()
+                self.file = None
+
+    def list_groups(self) -> List[str]:
+        groups = []
+        if not self.filepath.exists(): return groups
+        
+        is_owner = False
+        if self.file is None:
+            self.file = h5py.File(self.filepath, mode='r', libver=self.libver)
+            is_owner = True
+            
+        try:
+            if "FEATURES" in self.file:
+                features_group = self.file["FEATURES"]
+                if isinstance(features_group, h5py.Group):
+                    groups = list(features_group.keys())
+            return groups
         finally:
             if is_owner:
                 self.file.close()

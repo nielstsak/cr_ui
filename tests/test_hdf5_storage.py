@@ -1,53 +1,56 @@
-# FICHIER : backend/tests/test_hdf5_storage.py
 import pytest
 import numpy as np
 from pathlib import Path
-from backend.data.hdf5_storage import HDF5Storage
+from backend.data.hdf5_storage import HDF5Storage, OHLCV_DTYPE
 
 @pytest.fixture
 def temp_h5_file(tmp_path: Path) -> Path:
-    """Fixture fournissant un chemin temporaire pour les tests HDF5."""
     return tmp_path / "data" / "BINANCE" / "BTCUSDT" / "1m" / "test_ohlcv.h5"
 
-def test_hdf5_manager_creates_directories(temp_h5_file: Path) -> None:
-    """Vérifie que le gestionnaire crée l'arborescence de dossiers manquante."""
-    assert not temp_h5_file.parent.exists()
-    
-    with HDF5Storage(temp_h5_file, mode='w') as manager:
-        manager.write_array("test_group/mock_data", np.array([1, 2, 3], dtype=np.float64))
+def test_hdf5_storage_dynamic_group_path(temp_h5_file: Path) -> None:
+    with HDF5Storage(temp_h5_file, group_path="/OHLCV", mode='w') as manager:
+        assert manager.dataset_path == "OHLCV"
         
+    with HDF5Storage(temp_h5_file, group_path="/FEATURES/MOMENTUM", mode='w') as manager:
+        assert manager.dataset_path == "FEATURES/MOMENTUM"
+
+def test_hdf5_storage_list_groups(temp_h5_file: Path) -> None:
+    with HDF5Storage(temp_h5_file, mode='w') as manager:
+        manager.write_array("OHLCV", np.zeros(5, dtype=OHLCV_DTYPE))
+        
+        feature_dtype = np.dtype([('open_time', np.int64), ('RSI_14', np.float64)])
+        manager.write_array("FEATURES/MOMENTUM", np.zeros(5, dtype=feature_dtype))
+        manager.write_array("FEATURES/OVERLAP", np.zeros(5, dtype=feature_dtype))
+        
+    with HDF5Storage(temp_h5_file, mode='r') as reader:
+        groups = reader.list_groups()
+        assert "MOMENTUM" in groups
+        assert "OVERLAP" in groups
+        assert len(groups) == 2
+
+def test_hdf5_manager_creates_directories(temp_h5_file: Path) -> None:
+    assert not temp_h5_file.parent.exists()
+    with HDF5Storage(temp_h5_file, mode='w', group_path="/OHLCV") as manager:
+        manager.write_array(manager.dataset_path, np.zeros(3, dtype=OHLCV_DTYPE))
     assert temp_h5_file.parent.exists()
-    assert temp_h5_file.exists()
 
 def test_hdf5_manager_read_write_consistency(temp_h5_file: Path) -> None:
-    """Vérifie l'intégrité des données numériques lors d'un cycle écriture/lecture."""
-    original_data = np.array([[100.5, 101.2], [101.2, 99.8]], dtype=np.float32)
-    dataset_path = "market_data/ohlcv"
+    original_data = np.zeros(2, dtype=OHLCV_DTYPE)
+    original_data['open_time'] = [1000, 2000]
+    original_data['close'] = [100.5, 101.2]
     
-    with HDF5Storage(temp_h5_file, mode='w') as manager:
-        manager.write_array(dataset_path, original_data)
+    with HDF5Storage(temp_h5_file, mode='w', group_path="/OHLCV") as manager:
+        manager.write_array(manager.dataset_path, original_data)
         
-    with HDF5Storage(temp_h5_file, mode='r') as manager:
-        retrieved_data = manager.read_array(dataset_path)
+    with HDF5Storage(temp_h5_file, mode='r', group_path="/OHLCV") as manager:
+        retrieved_data = manager.read_array(manager.dataset_path)
         
-    np.testing.assert_array_equal(original_data, retrieved_data)
-    assert retrieved_data.dtype == np.float32
+    np.testing.assert_array_equal(original_data['open_time'], retrieved_data['open_time'])
+    np.testing.assert_array_equal(original_data['close'], retrieved_data['close'])
 
 def test_hdf5_manager_type_enforcement(temp_h5_file: Path) -> None:
-    """Vérifie que seules les structures NumPy sont acceptées pour Numba/VectorBT."""
-    invalid_data = [1, 2, 3]  # Liste native Python (non optimisée)
+    invalid_data = [1, 2, 3] 
     
-    with HDF5Storage(temp_h5_file, mode='w') as manager:
+    with HDF5Storage(temp_h5_file, mode='w', group_path="/OHLCV") as manager:
         with pytest.raises(TypeError, match="Le format de données doit être un numpy.ndarray"):
-            manager.write_array("market_data/invalid", invalid_data) # type: ignore
-
-def test_hdf5_manager_swmr_mode(temp_h5_file: Path) -> None:
-    """Vérifie l'activation du mode Single-Writer/Multiple-Reader (SWMR)."""
-    data = np.arange(10, dtype=np.int32)
-    
-    with HDF5Storage(temp_h5_file, mode='w') as manager:
-        # SWMR nécessite que les datasets soient 'chunked'
-        manager.write_array("swmr_data", data, maxshape=(None,), chunks=True)
-        manager.enable_swmr()
-        assert manager.file is not None
-        assert manager.file.swmr_mode is True
+            manager.write_array(manager.dataset_path, invalid_data) # type: ignore

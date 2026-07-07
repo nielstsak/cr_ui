@@ -1,4 +1,4 @@
-# Multi-stage build for Python with TA-Lib
+
 FROM python:3.13-slim AS builder
 
 WORKDIR /app
@@ -18,7 +18,6 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     cd .. && \
     rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
-# Final image stage
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -30,19 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzmq3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copier uniquement les fichiers nécessaires
 COPY backend/requirements.txt .
 COPY backend/vectorbtpro_package/ ./backend/vectorbtpro_package/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier le code source dans le dossier backend
 COPY backend/ ./backend/
 
-# Set python path
 ENV PYTHONPATH=/app
 
-# Setup entrypoint script
 RUN chmod +x backend/entrypoint.sh
 
 ENTRYPOINT ["/app/backend/entrypoint.sh"]

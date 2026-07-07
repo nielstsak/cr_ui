@@ -1,19 +1,14 @@
-import React, { useMemo } from 'react';
-import useAppStore from '../store/useAppStore';
 
-/**
- * Composant InformationsData - Rework complet pour le Bloc 3 (Informations Symbole).
- * Centralise l'affichage de l'arborescence multi-timeframe ainsi que les rapports d'introspection
- * d'ingestion natifs issus directement des commandes vectorbtpro.
- */
+import React, { useMemo } from 'react';
+import { useMarketStore } from '../entities/market/store';
+
 const InformationsData = () => {
-  const activeSymbol = useAppStore((state) => state.activeSymbol);
-  const descStats = useAppStore((state) => state.descStats);
-  const vbtInfo = useAppStore((state) => state.vbtInfo);
+  const activeSymbol = useMarketStore((state) => state.activeSymbol);
+  const descStats = useMarketStore((state) => state.descStats);
+  const vbtInfo = useMarketStore((state) => state.vbtInfo);
 
   const TIMEFRAME_ORDER = ['5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d'];
 
-  // Tri déterministe et ordonné des unités de temps locales détectées sur le disque
   const sortedStats = useMemo(() => {
     if (!descStats) return [];
     return Object.entries(descStats).sort((a, b) => {
@@ -33,7 +28,6 @@ const InformationsData = () => {
   return (
     <div className="space-y-6">
       
-      {/* SECTION 3.A : data.data['symboleselectionne'].info() */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm space-y-3">
         <h4 className="text-white text-xs font-bold uppercase tracking-wider flex items-center border-b border-[#30363d] pb-2 text-[#58a6ff]">
           <i className="fa-solid fa-terminal mr-2 text-[#8b949e]"></i> 
@@ -50,7 +44,6 @@ const InformationsData = () => {
         )}
       </div>
 
-      {/* SECTION 3.B : data.stats() */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm space-y-3">
         <h4 className="text-white text-xs font-bold uppercase tracking-wider flex items-center border-b border-[#30363d] pb-2 text-[#58a6ff]">
           <i className="fa-solid fa-table-list mr-2 text-[#8b949e]"></i> 
@@ -84,7 +77,6 @@ const InformationsData = () => {
         )}
       </div>
 
-      {/* SECTION 3.C : Synthèse Physique Multi-Timeframe (Conservation Intégrale de l'Historique local HDF5) */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 shadow-sm space-y-3">
         <h4 className="text-white text-xs font-bold uppercase tracking-wider flex items-center border-b border-[#30363d] pb-2 text-[#58a6ff]">
           <i className="fa-solid fa-chart-pie mr-2 text-[#8b949e]"></i> 
