@@ -21,7 +21,7 @@ class AppStateManager:
         self.file_path = os.path.abspath(file_path)
         self.state = {
             "active_pairs": [],
-            "configurations": { "initial_balance": 10000.0, "fee_rate": 0.0004, "slippage_rate": 0.0005, "mmr": 0.05, "leverage": 1.0, "storage_dir": "data" },
+            "configurations": { "initial_balance": 10000.0, "fee_rate": 0.001, "slippage_rate": 0.0005, "mmr": 0.05, "leverage": 1.0, "storage_dir": "data" },
             "session": { "status": "online", "started_at": int(time.time()) }
         }
         self._load()
@@ -119,10 +119,12 @@ async def websocket_endpoint(websocket: WebSocket):
 from backend.api.routes_ingestion import router as ingestion_router
 from backend.api.routes_indicators import router as indicators_router
 from backend.api.routes_feature_engineering import router as feature_engineering_router
+from backend.api.routes_optuna import router as optuna_router
 
 app.include_router(ingestion_router)
 app.include_router(indicators_router)
 app.include_router(feature_engineering_router)
+app.include_router(optuna_router)
 
 if __name__ == "__main__":
     uvicorn.run("backend.api.gateway:app", host="0.0.0.0", port=8000, reload=True)

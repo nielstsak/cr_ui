@@ -7,6 +7,7 @@ export const useTaskPolling = (taskId, options = {}) => {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
   
   const savedOnComplete = useRef(onComplete);
   const savedOnFailure = useRef(onFailure);
@@ -21,17 +22,22 @@ export const useTaskPolling = (taskId, options = {}) => {
       setProgress(0);
       setStatus(null);
       setError(null);
+      setResult(null);
       return;
     }
 
     setStatus('running');
     setProgress(0);
+    setResult(null);
 
     const interval = setInterval(async () => {
       try {
         const data = await client.get(`/api/tasks/${taskId}`);
         setProgress(data.progress);
         setStatus(data.status);
+        if (data.result) {
+          setResult(data.result);
+        }
 
         if (data.status === 'completed') {
           clearInterval(interval);
@@ -52,5 +58,5 @@ export const useTaskPolling = (taskId, options = {}) => {
     return () => clearInterval(interval);
   }, [taskId, intervalMs]);
 
-  return { progress, status, error };
+  return { progress, status, error, result };
 };

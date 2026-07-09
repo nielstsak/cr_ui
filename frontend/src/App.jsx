@@ -4,11 +4,15 @@ import { useMarketStore } from './entities/market/store';
 import { IngestionPage } from './pages/IngestionPage';
 import { ChartingPage } from './pages/ChartingPage';
 import { FeatureEngineeringPage } from './pages/FeatureEngineeringPage';
+import { MLOptunaPage } from './pages/MLOptunaPage';
+import { PostAnalysisPage } from './pages/PostAnalysisPage';
 
 const TABS = [
   { id: 'ingestion', label: '📥 Ingestion Données', component: IngestionPage },
   { id: 'charting', label: '📈 Graphiques & Indicateurs', component: ChartingPage },
-  { id: 'feature-engineering', label: '⚙️ Feature Engineering', component: FeatureEngineeringPage }
+  { id: 'feature-engineering', label: '⚙️ Feature Engineering', component: FeatureEngineeringPage },
+  { id: 'ml-optuna', label: '🤖 ML & Optuna', component: MLOptunaPage },
+  { id: 'post-analysis', label: '📊 Analyse Optimisation', component: PostAnalysisPage }
 ];
 
 function App() {
